@@ -1,6 +1,7 @@
 """Task 006 - AI admissions agent core tests."""
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -345,11 +346,14 @@ def test_lead_capture_and_scoring_across_conversation(db):
     orch.handle_message(conv, "My Class 12 score is 84%.")
     result = orch.handle_message(conv, "I want to know about scholarships.")
 
-    # Task 007 seeds three deterministic demo leads for Nova - select the
-    # one this conversation just created (most recently created).
-    lead = db.execute(
-        select(Lead).where(Lead.college_id == nova.id).order_by(Lead.created_at.desc())
-    ).scalars().first()
+    # Task 007 seeds three deterministic demo leads for Nova alongside this
+    # conversation's own lead - all created in the same test transaction,
+    # so created_at ordering is not reliable (Postgres now() is frozen for
+    # the whole transaction). Look up the exact lead this conversation
+    # created via its own state instead.
+    assert result.state is not None and result.state.lead_id
+    lead = db.get(Lead, uuid.UUID(result.state.lead_id))
+    assert lead is not None
     assert lead.lead_score > 0
     assert lead.course_id is not None
 
@@ -436,7 +440,11 @@ def test_human_escalation_creates_ticket_and_marks_conversation(db):
     assert "escalate_to_counselor" in result.tools_used
     assert result.escalation_required is True
     assert conv.status == "escalated"
-    ticket = db.execute(select(SupportTicket).where(SupportTicket.college_id == nova.id)).scalar_one()
+    # Task 010 seeds demo support tickets for Nova (unlinked to any
+    # conversation) - select the one this conversation actually created.
+    ticket = db.execute(
+        select(SupportTicket).where(SupportTicket.college_id == nova.id, SupportTicket.conversation_id == conv.id)
+    ).scalar_one()
     assert ticket.category == "counselor_escalation"
 
 

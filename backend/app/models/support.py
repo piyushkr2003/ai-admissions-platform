@@ -45,6 +45,7 @@ class SupportTicket(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     priority: Mapped[str] = mapped_column(String(30), nullable=False, default="normal")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="open", index=True)
     resolved_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
 
 class AuditLog(UUIDPrimaryKeyMixin, Base):

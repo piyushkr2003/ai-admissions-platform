@@ -24,7 +24,7 @@ from app.models.college import College
 from app.models.counseling import Counselor, CounselorAvailability
 from app.models.leads import Lead
 from app.models.student import Student
-from app.models.support import FAQ
+from app.models.support import FAQ, SupportTicket
 from app.models.user import User
 
 
@@ -220,8 +220,9 @@ def _seed_nova(db: Session) -> dict:
     ))
 
     leads = _seed_nova_leads(db, college, courses)
+    tickets = _seed_nova_support_tickets(db, college, counselor_user)
 
-    return {"college": college, "courses": courses, "counselor": counselor, "leads": leads}
+    return {"college": college, "courses": courses, "counselor": counselor, "leads": leads, "support_tickets": tickets}
 
 
 def _seed_nova_leads(db: Session, college: College, courses: dict) -> dict:
@@ -278,6 +279,41 @@ def _seed_nova_leads(db: Session, college: College, courses: dict) -> dict:
     service.recalculate_score(hot_lead)
 
     return {"cold": cold_lead, "warm": warm_lead, "hot": hot_lead}
+
+
+def _seed_nova_support_tickets(db: Session, college: College, counselor_user: User) -> dict:
+    """Three deterministic demo tickets covering the open/assigned/
+    resolved lifecycle (docs/tasks/010). Fictional data only."""
+    open_ticket = SupportTicket(
+        college_id=college.id,
+        category="technical",
+        subject="Unable to access fee payment portal",
+        description="A prospective student reported the online fee payment portal was not loading.",
+        priority="normal",
+        status="open",
+    )
+    escalated_ticket = SupportTicket(
+        college_id=college.id,
+        assigned_to=counselor_user.id,
+        category="counselor_escalation",
+        subject="Counselor escalation requested",
+        description="Student wants a detailed comparison between B.Tech CSE and AI & ML before deciding.",
+        priority="high",
+        status="assigned",
+    )
+    resolved_ticket = SupportTicket(
+        college_id=college.id,
+        assigned_to=counselor_user.id,
+        category="general",
+        subject="Question about hostel allocation timing",
+        description="Student asked when hostel rooms are allocated relative to admission confirmation.",
+        priority="low",
+        status="resolved",
+        resolved_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    db.add_all([open_ticket, escalated_ticket, resolved_ticket])
+    db.flush()
+    return {"open": open_ticket, "escalated": escalated_ticket, "resolved": resolved_ticket}
 
 
 def _seed_aurora(db: Session) -> dict:
