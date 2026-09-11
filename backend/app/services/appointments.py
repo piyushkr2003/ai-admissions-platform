@@ -34,6 +34,7 @@ from app.core.errors import ConflictError, NotFoundError, ValidationAppError
 from app.models.academics import Course
 from app.models.counseling import Appointment, Counselor, CounselorAvailability
 from app.services.audit import record_audit
+from app.services.lead_signals import notify_lead as _notify_lead
 
 logger = logging.getLogger("app.appointments")
 
@@ -47,20 +48,6 @@ class AvailableSlot:
     counselor_name: str
     start_time: datetime
     duration_minutes: int = SLOT_MINUTES
-
-
-def _notify_lead(db: Session, college_id: uuid.UUID, student_id: uuid.UUID, event_type: str, reason: str) -> None:
-    """Best-effort lead-scoring hook. Never raises - a scoring hiccup must
-    never roll back or fail a real appointment operation."""
-    try:
-        from app.services.leads import LeadService
-
-        lead_service = LeadService(db)
-        lead = lead_service.get_active_lead(college_id, student_id)
-        if lead is not None:
-            lead_service.record_event_and_rescore(lead, event_type, reason, source="appointment_service")
-    except Exception:  # noqa: BLE001 - deliberately broad: this must never break booking
-        logger.warning("lead_notification_failed event_type=%s student_id=%s", event_type, student_id, exc_info=True)
 
 
 class AppointmentService:

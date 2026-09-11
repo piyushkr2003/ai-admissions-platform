@@ -48,9 +48,4 @@ def get_application_status(ctx: ToolContext, *, application_id: str) -> ToolResu
         message = getattr(exc, "message", "Invalid application_id.")
         return ToolResult.fail(code, message)
 
-    return ToolResult.ok({
-        "application_id": str(application.id),
-        "status": application.status,
-        "completion_percentage": application.completion_percentage,
-        "next_steps": service.next_steps(application),
-    })
+    return ToolResult.ok(service.status_report(application))
