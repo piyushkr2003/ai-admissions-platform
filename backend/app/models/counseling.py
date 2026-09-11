@@ -70,5 +70,6 @@ class Appointment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     meeting_type: Mapped[str] = mapped_column(String(50), nullable=False, default="phone")
     meeting_link: Mapped[str | None] = mapped_column(Text, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cancellation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     source: Mapped[str] = mapped_column(String(50), nullable=False, default="ai_agent")
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)

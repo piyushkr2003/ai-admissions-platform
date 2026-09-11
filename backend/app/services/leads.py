@@ -51,6 +51,15 @@ SCORING_RULES: dict[str, dict] = {
     "entrance_score_provided": {"points": 5, "label": "Entrance exam score provided", "positive": True},
     "documents_requested": {"points": 5, "label": "Required documents requested", "positive": True},
     "application_submitted": {"points": 10, "label": "Application submitted", "positive": True},
+    # Appointment-lifecycle signals wired in by Task 008's AppointmentService
+    # (docs/tasks/007 section 22 - "provide the clean integration points
+    # needed for appointment services to update leads"). A reschedule is a
+    # small positive continued-engagement signal; a cancellation is
+    # recorded purely for audit/explainability (0 points) since it is not,
+    # by itself, reliable evidence of lost interest (docs/tasks/007
+    # section 11: negative rules require explicit justification).
+    "appointment_rescheduled": {"points": 5, "label": "Appointment rescheduled", "positive": True},
+    "appointment_cancelled": {"points": 0, "label": "Appointment cancelled", "positive": False},
     # Negative signals (docs/tasks/007 sections 11-12) - bounded at 0, never decayed automatically.
     "disqualified": {"points": -20, "label": "Lead disqualified", "positive": False},
     "explicitly_not_interested": {"points": -10, "label": "Explicitly no longer interested", "positive": False},
