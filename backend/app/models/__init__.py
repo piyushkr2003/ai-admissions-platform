@@ -3,6 +3,7 @@ Alembic autogeneration and for test schema creation."""
 from app.db.base import Base  # noqa: F401
 from app.models.college import College  # noqa: F401
 from app.models.user import User  # noqa: F401
+from app.models.auth import RefreshSession  # noqa: F401
 from app.models.student import Student  # noqa: F401
 from app.models.academics import (  # noqa: F401
     Course,
@@ -23,6 +24,7 @@ __all__ = [
     "Base",
     "College",
     "User",
+    "RefreshSession",
     "Student",
     "Course",
     "CourseEligibilityRule",
