@@ -91,3 +91,18 @@ def require_college_access(college_id: uuid.UUID, user: User = Depends(get_curre
     if user.college_id is None or user.college_id != college_id:
         raise TenantAccessDeniedError()
     return user
+
+
+def require_college_permission(permission: str) -> Callable[..., User]:
+    """Combine tenant-ownership and role-permission checks for a
+    `{college_id}`-scoped route in one dependency."""
+
+    def _dependency(college_id: uuid.UUID, user: User = Depends(get_current_user)) -> User:
+        if user.role != "platform_admin":
+            if user.college_id is None or user.college_id != college_id:
+                raise TenantAccessDeniedError()
+        if not has_permission(user.role, permission):
+            raise ForbiddenError(f"Role '{user.role}' is not permitted to perform this action.")
+        return user
+
+    return _dependency
