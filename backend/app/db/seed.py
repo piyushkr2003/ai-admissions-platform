@@ -22,6 +22,8 @@ from app.models.academics import AdmissionDate, Course, CourseEligibilityRule, R
 from app.models.agent_config import AgentConfig
 from app.models.college import College
 from app.models.counseling import Counselor, CounselorAvailability
+from app.models.leads import Lead
+from app.models.student import Student
 from app.models.support import FAQ
 from app.models.user import User
 
@@ -217,7 +219,65 @@ def _seed_nova(db: Session) -> dict:
         active=True,
     ))
 
-    return {"college": college, "courses": courses, "counselor": counselor}
+    leads = _seed_nova_leads(db, college, courses)
+
+    return {"college": college, "courses": courses, "counselor": counselor, "leads": leads}
+
+
+def _seed_nova_leads(db: Session, college: College, courses: dict) -> dict:
+    """Three deterministic demo leads covering COLD/WARM/HOT
+    (docs/tasks/007 section 45). Fictional data only; safe to rerun once
+    per fresh database the way the rest of seed_demo_data is."""
+    from app.services.leads import LeadService
+
+    service = LeadService(db)
+
+    cold_student = Student(
+        college_id=college.id, full_name="Demo Student 1", email="demo.student1@example.edu",
+        phone="9800000001", qualification="12th", consent_status="granted",
+    )
+    warm_student = Student(
+        college_id=college.id, full_name="Demo Student 2", email="demo.student2@example.edu",
+        phone="9800000002", qualification="12th", qualification_score=78, consent_status="granted",
+    )
+    hot_student = Student(
+        college_id=college.id, full_name="Demo Student 3", email="demo.student3@example.edu",
+        phone="9800000003", qualification="12th", qualification_score=91, scholarship_interest=True,
+        consent_status="granted",
+    )
+    db.add_all([cold_student, warm_student, hot_student])
+    db.flush()
+
+    cold_lead = Lead(
+        college_id=college.id, student_id=cold_student.id, course_id=courses["BCA"].id,
+        source="website", status="new",
+    )
+    warm_lead = Lead(
+        college_id=college.id, student_id=warm_student.id, course_id=courses["BTECH-CSE"].id,
+        source="voice_agent", status="contacted",
+    )
+    hot_lead = Lead(
+        college_id=college.id, student_id=hot_student.id, course_id=courses["BTECH-AIML"].id,
+        source="voice_agent", status="qualified", scholarship_interest=True,
+    )
+    db.add_all([cold_lead, warm_lead, hot_lead])
+    db.flush()
+
+    service.record_score_event(cold_lead, "course_identified", reason="Asked about BCA.")
+    service.recalculate_score(cold_lead)
+
+    service.record_score_event(warm_lead, "course_identified", reason="Interested in B.Tech CSE.")
+    service.record_score_event(warm_lead, "eligibility_confirmed", reason="12th percentage confirmed eligible.")
+    service.record_score_event(warm_lead, "fee_discussed", reason="Asked about CSE annual fee.")
+    service.recalculate_score(warm_lead)
+
+    service.record_score_event(hot_lead, "course_identified", reason="Interested in B.Tech AI & ML.")
+    service.record_score_event(hot_lead, "eligibility_confirmed", reason="12th percentage confirmed eligible.")
+    service.record_score_event(hot_lead, "scholarship_interest", reason="Asked about merit scholarship.")
+    service.record_score_event(hot_lead, "appointment_requested", reason="Requested a counselor appointment.")
+    service.recalculate_score(hot_lead)
+
+    return {"cold": cold_lead, "warm": warm_lead, "hot": hot_lead}
 
 
 def _seed_aurora(db: Session) -> dict:

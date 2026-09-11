@@ -6,6 +6,7 @@ import uuid
 
 from app.agent.schemas import ToolResult
 from app.agent.tools.base import ToolContext
+from app.core.errors import AppError
 from app.services.leads import LeadService
 
 
@@ -32,15 +33,25 @@ def update_lead(ctx: ToolContext, *, lead_id: str, **fields) -> ToolResult:
     except ValueError:
         return ToolResult.fail("VALIDATION_ERROR", "Invalid lead_id.")
 
-    from app.models.leads import Lead
-    lead = ctx.db.get(Lead, lead_uuid)
-    if lead is None or lead.college_id != ctx.college_id:
-        return ToolResult.fail("NOT_FOUND", "Lead not found for this college.")
+    try:
+        lead = service.get_lead_or_404(ctx.college_id, lead_uuid)
+    except AppError as exc:
+        return ToolResult.fail(exc.code, exc.message)
 
-    allowed = {"course_id", "status", "intent", "next_action", "notes", "hostel_interest", "scholarship_interest", "parent_involvement"}
+    allowed = {"course_id", "intent", "next_action", "notes", "hostel_interest", "scholarship_interest", "parent_involvement"}
     updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
     service.update_lead_fields(lead, **updates)
-    return ToolResult.ok({"lead_id": str(lead.id), "updated_fields": list(updates.keys())})
+    updated_fields = list(updates.keys())
+
+    new_status = fields.get("status")
+    if new_status:
+        try:
+            service.transition_status(lead, new_status)
+        except AppError as exc:
+            return ToolResult.fail(exc.code, exc.message)
+        updated_fields.append("status")
+
+    return ToolResult.ok({"lead_id": str(lead.id), "updated_fields": updated_fields, "status": lead.status})
 
 
 def calculate_lead_score(ctx: ToolContext, *, lead_id: str, event_type: str | None = None, reason: str = "") -> ToolResult:
@@ -50,10 +61,10 @@ def calculate_lead_score(ctx: ToolContext, *, lead_id: str, event_type: str | No
     except ValueError:
         return ToolResult.fail("VALIDATION_ERROR", "Invalid lead_id.")
 
-    from app.models.leads import Lead
-    lead = ctx.db.get(Lead, lead_uuid)
-    if lead is None or lead.college_id != ctx.college_id:
-        return ToolResult.fail("NOT_FOUND", "Lead not found for this college.")
+    try:
+        lead = service.get_lead_or_404(ctx.college_id, lead_uuid)
+    except AppError as exc:
+        return ToolResult.fail(exc.code, exc.message)
 
     if event_type:
         result = service.record_event_and_rescore(lead, event_type, reason)

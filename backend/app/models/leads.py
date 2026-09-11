@@ -17,8 +17,11 @@ LEAD_STATUSES = (
     "application_started",
     "converted",
     "lost",
+    "disqualified",
 )
+TERMINAL_LEAD_STATUSES = ("converted", "lost", "disqualified")
 LEAD_TEMPERATURES = ("cold", "warm", "hot")
+LEAD_INTENTS = ("informational", "exploring", "interested", "high_intent", "ready_to_apply")
 
 
 class Lead(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -58,6 +61,8 @@ class LeadScoreEvent(UUIDPrimaryKeyMixin, Base):
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     points: Mapped[int] = mapped_column(Integer, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default="now()"
     )

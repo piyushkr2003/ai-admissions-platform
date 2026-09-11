@@ -433,8 +433,9 @@ class AgentOrchestrator:
                 state.lead_score = score_result.data["score"]
             new_status = status_by_event.get(event_type)
             if new_status:
-                run_tool("update_lead", leads.update_lead, lead_id=state.lead_id, status=new_status)
-                state.lead_status = new_status
+                status_result = run_tool("update_lead", leads.update_lead, lead_id=state.lead_id, status=new_status)
+                if status_result.success:
+                    state.lead_status = status_result.data["status"]
 
     # ------------------------------------------------------------------
     # Helpers

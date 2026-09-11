@@ -345,7 +345,11 @@ def test_lead_capture_and_scoring_across_conversation(db):
     orch.handle_message(conv, "My Class 12 score is 84%.")
     result = orch.handle_message(conv, "I want to know about scholarships.")
 
-    lead = db.execute(select(Lead).where(Lead.college_id == nova.id)).scalar_one()
+    # Task 007 seeds three deterministic demo leads for Nova - select the
+    # one this conversation just created (most recently created).
+    lead = db.execute(
+        select(Lead).where(Lead.college_id == nova.id).order_by(Lead.created_at.desc())
+    ).scalars().first()
     assert lead.lead_score > 0
     assert lead.course_id is not None
 
