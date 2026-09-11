@@ -54,3 +54,20 @@ class KnowledgeChunk(UUIDPrimaryKeyMixin, Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default="now()"
     )
+
+
+class UnansweredQuestion(UUIDPrimaryKeyMixin, Base):
+    """Tracks queries the knowledge base could not confidently answer, so
+    college administrators can identify and close knowledge gaps
+    (docs/rag.md sections 45, 59-60)."""
+
+    __tablename__ = "unanswered_questions"
+
+    college_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("colleges.id"), nullable=False, index=True
+    )
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    top_score: Mapped[float | None] = mapped_column(nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default="now()", index=True
+    )

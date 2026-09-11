@@ -93,6 +93,23 @@ def require_college_access(college_id: uuid.UUID, user: User = Depends(get_curre
     return user
 
 
+def resolve_tenant_college_id(user: User, college_id: uuid.UUID | None) -> uuid.UUID:
+    """Derive the tenant to operate on from trusted server-side context.
+
+    College-scoped users always operate on their own college_id, taken
+    from the signed token - the `college_id` argument (if any) is
+    ignored for them, not merely checked. Only a platform_admin, who has
+    no single home college, may explicitly select a tenant this way.
+    """
+    if user.role == "platform_admin":
+        if college_id is None:
+            raise ForbiddenError("college_id is required for platform admin requests.")
+        return college_id
+    if user.college_id is None:
+        raise ForbiddenError("This account is not associated with a college.")
+    return user.college_id
+
+
 def require_college_permission(permission: str) -> Callable[..., User]:
     """Combine tenant-ownership and role-permission checks for a
     `{college_id}`-scoped route in one dependency."""

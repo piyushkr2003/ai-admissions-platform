@@ -16,7 +16,7 @@ from app.models.counseling import Counselor, CounselorAvailability, Appointment 
 from app.models.leads import Lead, LeadScoreEvent  # noqa: F401
 from app.models.applications import Application, ApplicationDocument  # noqa: F401
 from app.models.conversations import Conversation, Message  # noqa: F401
-from app.models.knowledge import KnowledgeSource, KnowledgeChunk  # noqa: F401
+from app.models.knowledge import KnowledgeSource, KnowledgeChunk, UnansweredQuestion  # noqa: F401
 from app.models.agent_config import AgentConfig  # noqa: F401
 from app.models.support import FAQ, SupportTicket, AuditLog  # noqa: F401
 
@@ -42,6 +42,7 @@ __all__ = [
     "Message",
     "KnowledgeSource",
     "KnowledgeChunk",
+    "UnansweredQuestion",
     "AgentConfig",
     "FAQ",
     "SupportTicket",
