@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -47,8 +47,16 @@ class CounselorAvailability(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class Appointment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "appointments"
     __table_args__ = (
-        UniqueConstraint(
-            "counselor_id", "start_time", name="uq_appointment_counselor_start_time"
+        # Partial (not a plain UniqueConstraint) so a cancelled/completed/
+        # no-show appointment never permanently occupies its slot - only a
+        # currently "scheduled" appointment blocks a (counselor, start_time)
+        # pair, matching AppointmentService._ACTIVE_STATUSES exactly. This
+        # is still the same race-prevention safety net described in
+        # AppointmentService's module docstring: two concurrent bookings for
+        # the same still-open slot cannot both insert as "scheduled".
+        Index(
+            "uq_appointment_counselor_start_time_active", "counselor_id", "start_time",
+            unique=True, postgresql_where=text("status = 'scheduled'"),
         ),
         # Serves analytics date-range queries (Task 013).
         Index("ix_appointments_college_created", "college_id", "created_at"),

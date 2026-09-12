@@ -170,6 +170,37 @@ def test_cancel_preserves_notes_and_records_reason(db):
     assert cancelled.cancellation_reason == "Student requested cancellation"
 
 
+def test_cancelled_slot_can_be_rebooked_at_the_exact_same_time(db):
+    """Regression test: the (counselor_id, start_time) uniqueness must only
+    apply to a currently "scheduled" appointment. Before this fix it was a
+    plain UniqueConstraint with no status filter, so a cancelled (or
+    completed/no-show) appointment permanently occupied its slot and a
+    real student could never be booked into a time another student had
+    since freed up - discovered via a real-Postgres smoke test, not
+    exercised by any prior test because each test's transaction starts
+    empty."""
+    seed_demo_data(db)
+    nova = _college(db, "nova-institute-of-technology")
+    counselor = db.execute(select(Counselor).where(Counselor.college_id == nova.id)).scalars().first()
+    service = AppointmentService(db)
+    slots = service.check_availability(college_id=nova.id, counselor_id=counselor.id)
+    slot_time = slots[0].start_time
+
+    first_student = _bare_student(db, nova.id)
+    first_appt = service.book_appointment(
+        college_id=nova.id, student_id=first_student.id, counselor_id=counselor.id, start_time=slot_time,
+    )
+    service.cancel(nova.id, first_appt.id, "No longer needed")
+
+    second_student = _bare_student(db, nova.id)
+    second_appt = service.book_appointment(
+        college_id=nova.id, student_id=second_student.id, counselor_id=counselor.id, start_time=slot_time,
+    )
+    assert second_appt.status == "scheduled"
+    assert second_appt.start_time == slot_time
+    assert second_appt.id != first_appt.id
+
+
 def test_complete_and_no_show_transitions(db):
     seed_demo_data(db)
     nova = _college(db, "nova-institute-of-technology")
