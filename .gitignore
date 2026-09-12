@@ -19,6 +19,7 @@ node_modules/
 .next/
 dist/
 build/
+*.tsbuildinfo
 
 # OS / editor
 .DS_Store
