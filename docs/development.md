@@ -2558,3 +2558,24 @@ Selecting a provider name other than `mock` without its adapter/credential raise
 
 Implement the relevant interface in `app/voice/providers/` (`STTProvider`, `TTSProvider`, `RealtimeTransportProvider`, or `TelephonyProvider`), register it in `app/voice/providers/factory.py` behind its provider name, and set the corresponding `*_PROVIDER` and credential environment variables. `app/services/voice.py` and the voice API do not change.
 
+## Analytics & Reporting (Task 013 Addendum)
+
+Backed by `app/analytics/` (`dates.py`, `service.py`, `router.py`); see docs/api-contract.md section 64 for the full endpoint contract.
+
+### Local development
+
+1. `alembic upgrade head` (adds the `ix_*_college_created` composite indexes analytics queries rely on - no new tables).
+2. Seed demo data (`python scripts/seed_demo.py`) and call `GET /api/v1/analytics/overview?range=last_30_days` as a seeded staff user - it is real aggregation over whatever leads/appointments/applications/conversations/support tickets/voice sessions already exist, nothing mocked.
+3. Every number in the response is produced by SQL `COUNT`/`GROUP BY`/`AVG` against the existing tables, filtered by `college_id` first - there is no analytics-specific data store.
+
+### Testing
+
+`tests/test_analytics.py` covers: a zero-data college, Nova's real seeded data, Aurora tenant isolation (including a college_admin trying to spoof `college_id` and a platform_admin required to pick one explicitly), RBAC, invalid/future/empty/custom date ranges, a timezone-boundary case proving day buckets follow the college's local timezone rather than UTC, course/status/channel breakdowns, the AI-resolution-rate metric being reported as explicitly unavailable, response determinism, absence of student PII in the payload, and a query-count guard proving the endpoint does not scale linearly with row count (no N+1).
+
+### Known limitations
+
+- `ai_resolution_rate` is intentionally never computed - see docs/api-contract.md section 64 for why.
+- Lead → appointment/application "conversion" is a student-level signal (via the shared `student_id` foreign key), not a per-lead-instance one, because no `lead_id` column exists on `appointments`/`applications`.
+- `query_categories` reflects each conversation's *most recent* detected intent, not a full per-turn intent history.
+- The frontend's existing `/dashboard/analytics` page (Task 012) still composes its view from list-endpoint counts rather than calling the new `/api/v1/analytics/overview` - that page predates this task and was intentionally left alone (docs/api-contract.md section 64); switching it over is a good first Task 014 candidate.
+

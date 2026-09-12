@@ -43,11 +43,14 @@ export const analyticsApi = {
       { label: "Cold", value: "cold", count: countFor(leadsApi.list(client, collegeId, { temperature: "cold", page_size: 1 })) },
     ]);
 
+    // Status values must match app/models/counseling.py's APPOINTMENT_STATUSES
+    // exactly ("requested"/"confirmed" never occur - the backend never used
+    // those values, so those slices always silently read zero).
     const appointmentStatusGroup = buildGroup("appointment_status", "Appointments by Status", [
-      { label: "Requested", value: "requested", count: countFor(appointmentsApi.list(client, collegeId, { status: "requested", page_size: 1 })) },
-      { label: "Confirmed", value: "confirmed", count: countFor(appointmentsApi.list(client, collegeId, { status: "confirmed", page_size: 1 })) },
+      { label: "Scheduled", value: "scheduled", count: countFor(appointmentsApi.list(client, collegeId, { status: "scheduled", page_size: 1 })) },
       { label: "Completed", value: "completed", count: countFor(appointmentsApi.list(client, collegeId, { status: "completed", page_size: 1 })) },
       { label: "Cancelled", value: "cancelled", count: countFor(appointmentsApi.list(client, collegeId, { status: "cancelled", page_size: 1 })) },
+      { label: "Rescheduled", value: "rescheduled", count: countFor(appointmentsApi.list(client, collegeId, { status: "rescheduled", page_size: 1 })) },
       { label: "No-show", value: "no_show", count: countFor(appointmentsApi.list(client, collegeId, { status: "no_show", page_size: 1 })) },
     ]);
 

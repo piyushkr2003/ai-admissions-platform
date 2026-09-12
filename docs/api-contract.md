@@ -2842,67 +2842,94 @@ resolved
 
 closed
 
-64\. Analytics APIs
+64\. Analytics APIs (implemented - Task 013)
 
-GET /analytics/overview
+Backed by `app/analytics/` (`dates.py`, `service.py`, `router.py`). Two endpoints cover every domain rather than one per entity, because a dashboard needs one efficient snapshot plus one time-series call, not a dozen near-identical round trips:
 
+```text
+GET /api/v1/analytics/overview
+GET /api/v1/analytics/trends
+```
 
+Both require the `analytics:read` permission (granted to `platform_admin`, `college_admin`, `admissions_staff`, `counselor` in `app/auth/permissions.py`) and resolve their tenant exactly like every other endpoint in this API: `resolve_tenant_college_id(user, college_id)`. A college-scoped caller's `college_id` query parameter is never trusted - only a `platform_admin` (who has no single home college) may select one explicitly, and is rejected with `403 FORBIDDEN` if it omits `college_id` entirely.
 
-Return key metrics:
+### Query parameters (both endpoints)
 
+| Parameter | Type | Notes |
+|---|---|---|
+| `college_id` | UUID, optional | Ignored for college-scoped roles; required for `platform_admin` |
+| `range` | `today` \| `last_7_days` \| `last_30_days` \| `last_90_days` \| `custom` | Default `last_30_days` |
+| `start_date` | date (`YYYY-MM-DD`) | Required, inclusive, only when `range=custom` |
+| `end_date` | date (`YYYY-MM-DD`) | Required, inclusive, only when `range=custom` |
 
+**Date-range semantics** (`app/analytics/dates.py`): every range is resolved in the college's own `timezone` (`colleges.timezone`, e.g. `Asia/Kolkata`), not UTC and not the caller's timezone - "today" means today where the college is, not where the server happens to run. A resolved range is a half-open UTC interval `[start_utc, end_utc)`: the start instant is included, the end instant excluded, so adjacent ranges never double-count or gap at the boundary. Local calendar boundaries are converted to UTC through a timezone-aware `datetime` (`zoneinfo`), so DST transitions are handled correctly. `custom` ranges are inclusive of both `start_date` and `end_date` as local calendar dates. A range entirely in the future is valid and returns zero counts; only a malformed range (missing `custom` dates, `end_date` before `start_date`, an unrecognized `range` value, or a span over 366 days) is rejected with `422 VALIDATION_ERROR`. Every domain is filtered on that table's `created_at` for consistency; `average_duration_seconds`/`average_resolution_seconds` additionally require the specific event timestamp (`ended_at`/`resolved_at`-derived) to be non-null and report `"measurement": "unavailable"` with a `sample_size` of 0 when it never is.
 
-calls
+### `GET /api/v1/analytics/overview`
 
-conversations
+Returns current totals and breakdowns for the resolved range, tenant-scoped, computed entirely with SQL `COUNT`/`GROUP BY`/`AVG` (never by loading full tables into Python):
 
-new leads
+```json
+{
+  "data": {
+    "range": {"range": "last_30_days", "timezone": "Asia/Kolkata", "start_date": "...", "end_date": "...", "start_utc": "...", "end_utc": "..."},
+    "conversations": {"total_conversations": 0, "by_status": {}, "by_channel": {}, "by_language": {}, "average_duration_seconds": {"measurement": "...", "value": null, "sample_size": 0, "note": "..."}},
+    "leads": {"total_leads": 0, "new_leads": 0, "by_status": {}, "by_temperature": {}, "by_course": [], "appointment_conversion": {...}, "application_conversion": {...}},
+    "appointments": {"total_appointments": 0, "by_status": {}, "by_counselor": []},
+    "applications": {"total_applications": 0, "by_status": {}, "by_course": [], "completion_percentage_distribution": {"0": 0, "1-25": 0, "26-50": 0, "51-75": 0, "76-100": 0}},
+    "support": {"total_tickets": 0, "by_status": {}, "by_category": {}, "escalated_tickets": 0, "average_resolution_seconds": {...}},
+    "voice": {"total_sessions": 0, "by_status": {}, "by_channel": {}, "by_language": {}, "failed_sessions": 0, "average_duration_seconds": {...}},
+    "ai_operations": {"escalations": {...}, "tool_usage": {...}, "unanswered_questions": {...}, "query_categories": {...}, "ai_resolution_rate": {"measurement": "unavailable", "reason": "..."}}
+  },
+  "meta": {"request_id": "req_123"}
+}
+```
 
-hot leads
+Every `by_status`/`by_temperature`/`by_channel` breakdown for a fixed enum (lead status/temperature, voice session status/channel) always includes every known value at `0` rather than omitting empty buckets, so an empty college returns a valid zero-filled structure, never a missing key. Freeform breakdowns (support ticket category, course name, counselor name) only include values actually present, plus a labeled bucket for null/unset where relevant (e.g. `"No course specified"`).
 
-appointments
+**Metric provenance** - every derived/uncertain figure carries a `"measurement"` field:
+- `"directly_measured"`: a real COUNT/AVG/breakdown of persisted rows.
+- `"derived"`: computed from more than one directly-measured quantity via a documented formula (e.g. a conversion rate).
+- `"unavailable"`: intentionally not computed, with a `"reason"` explaining why the current data model cannot support a trustworthy answer.
 
-applications
+**Metric definitions:**
+- `new_leads` = leads created in range whose current status is `"new"`.
+- `appointment_conversion` / `application_conversion` = share of the *students* behind leads created in this range who have, at any point, booked at least one appointment / started at least one application. This is a **student-level** signal joined through the shared, non-nullable `student_id` foreign key - `appointments`/`applications` carry no `lead_id` column, so no per-lead-instance conversion is claimed.
+- `escalation_rate` (ai_operations) = escalated conversations ÷ total conversations in range, where "escalated" means `conversations.status == 'escalated'`.
+- `tool_usage.total_tool_invocations` = sum of the `tools_used` array length recorded on every AI response message (`app.agent.orchestrator._finish`); `ai_turns_with_tool_calls` = count of AI messages that recorded at least one tool call.
+- `unanswered_questions.count` = rows in `unanswered_questions`, populated by `app.rag.retrieval.service` whenever a knowledge-base query found no reliable evidence (RAG tenant-scoped by construction).
+- `query_categories` = breakdown by each conversation's most recently detected intent (`conversations.intent`) - a snapshot of the last turn's intent, not a full per-turn history.
+- `ai_resolution_rate`: **always `"unavailable"`.** The data model has no persisted resolution/satisfaction signal independent of escalation or ticket creation; treating a non-escalated `"completed"` conversation as "resolved by AI" would not be a trustworthy inference, so it is never approximated.
 
-escalations
+### `GET /api/v1/analytics/trends`
 
-AI resolution rate
+Same query parameters; returns the same range bucketed into local-calendar-day series (gaps filled with `0`, never omitted) for charting:
 
-GET /analytics/leads
+```json
+{
+  "data": {
+    "range": {...},
+    "conversations_per_day": [{"date": "2026-08-14", "count": 0}, ...],
+    "leads_per_day": [...],
+    "appointments_per_day": [...],
+    "applications_per_day": [...],
+    "support_tickets_per_day": [...],
+    "voice_sessions_per_day": [...]
+  }
+}
+```
 
+### Privacy
 
+Analytics responses expose only counts, aggregates, and course/counselor names - never a student's name, email, phone, or any other individually identifying field.
 
-Lead conversion metrics.
+### Performance / indexes
 
+Every table analytics filters on has a dedicated `(college_id, created_at)` composite index (migration `697de9da1bff_add_analytics_composite_indexes`) matching the `WHERE college_id = ? AND created_at >= ? AND created_at < ?` pattern every query in `app/analytics/service.py` uses. Each call to `overview`/`trends` issues a small, fixed number of aggregate queries regardless of how many rows exist for the tenant - no table is ever loaded row-by-row into Python.
 
+### Known limitations / not yet implemented
 
-GET /analytics/appointments
-
-
-
-Appointment metrics.
-
-
-
-GET /analytics/applications
-
-
-
-Application metrics.
-
-
-
-GET /analytics/conversations
-
-
-
-Conversation metrics.
-
-
-
-Analytics must be tenant-scoped.
-
-
+- The Task 012 `/dashboard/analytics` frontend page still composes its view from list-endpoint counts (`frontend/lib/api/analytics.ts`) rather than calling this endpoint - see docs/development.md's Task 013 addendum for why that migration was left for a later task.
+- No response caching - correctness over premature optimization at this data scale; add a short, tenant- and range-aware cache only if load testing shows it is needed.
 
 65\. Dashboard API
 

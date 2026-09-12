@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -15,6 +15,10 @@ MESSAGE_SENDER_TYPES = ("student", "parent", "ai", "system", "counselor")
 
 class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        # Serves analytics date-range queries (Task 013).
+        Index("ix_conversations_college_created", "college_id", "created_at"),
+    )
 
     college_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("colleges.id"), nullable=False, index=True
@@ -37,6 +41,12 @@ class Conversation(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class Message(UUIDPrimaryKeyMixin, Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        # Serves analytics date-range queries (Task 013), in addition to
+        # the existing standalone created_at index used for transcript
+        # ordering.
+        Index("ix_messages_college_created", "college_id", "created_at"),
+    )
 
     college_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("colleges.id"), nullable=False, index=True

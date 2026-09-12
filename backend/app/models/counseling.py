@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Time, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, Time, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -50,6 +50,8 @@ class Appointment(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint(
             "counselor_id", "start_time", name="uq_appointment_counselor_start_time"
         ),
+        # Serves analytics date-range queries (Task 013).
+        Index("ix_appointments_college_created", "college_id", "created_at"),
     )
 
     college_id: Mapped[uuid.UUID] = mapped_column(

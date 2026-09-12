@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,11 @@ LEAD_INTENTS = ("informational", "exploring", "interested", "high_intent", "read
 
 class Lead(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "leads"
+    __table_args__ = (
+        # Serves analytics date-range queries (Task 013): every one
+        # filters `college_id = ? AND created_at BETWEEN ? AND ?`.
+        Index("ix_leads_college_created", "college_id", "created_at"),
+    )
 
     college_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("colleges.id"), nullable=False, index=True

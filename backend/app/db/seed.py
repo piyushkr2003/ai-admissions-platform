@@ -321,6 +321,11 @@ def _seed_nova_support_tickets(db: Session, college: College, counselor_user: Us
         description="Student asked when hostel rooms are allocated relative to admission confirmation.",
         priority="low",
         status="resolved",
+        # created_at is explicitly backdated (rather than left at the
+        # server_default "now") so resolved_at falls after it - otherwise
+        # this demo ticket would appear to resolve before it was created,
+        # producing a negative resolution-time metric (Task 013).
+        created_at=datetime.now(timezone.utc) - timedelta(days=2),
         resolved_at=datetime.now(timezone.utc) - timedelta(days=1),
     )
     db.add_all([open_ticket, escalated_ticket, resolved_ticket])

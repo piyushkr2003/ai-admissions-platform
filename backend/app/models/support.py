@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, JSON, String, Text
 from sqlalchemy.dialects.postgresql import INET, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,6 +26,10 @@ class FAQ(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class SupportTicket(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "support_tickets"
+    __table_args__ = (
+        # Serves analytics date-range queries (Task 013).
+        Index("ix_support_tickets_college_created", "college_id", "created_at"),
+    )
 
     college_id: Mapped[uuid.UUID] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("colleges.id"), nullable=False, index=True

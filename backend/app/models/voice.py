@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,6 +27,8 @@ class VoiceSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         # constrains real phone calls (provider_call_id not null) -
         # concurrent web sessions never collide against it.
         UniqueConstraint("provider", "provider_call_id", name="uq_voice_session_provider_call"),
+        # Serves analytics date-range queries (Task 013).
+        Index("ix_voice_sessions_college_created", "college_id", "created_at"),
     )
 
     college_id: Mapped[uuid.UUID] = mapped_column(

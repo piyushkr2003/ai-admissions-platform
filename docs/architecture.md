@@ -1713,5 +1713,26 @@ Realtime transport (mock/         Telephony provider webhook
 
 `app/services/voice.py` owns only: session lifecycle, the turn-taking/barge-in state machine, provider selection, and converting the orchestrator's text response into speech. It never duplicates intent detection, tool logic, or business rules - those remain exactly the Task 006-010 implementations, reused unchanged. Provider interfaces live in `app/voice/providers/`; see docs/voice.md section 71 for what is implemented versus provider-dependent, and docs/api-contract.md's Voice APIs section for the request/response contract.
 
+---
+
+## Analytics Architecture (Task 013 Addendum)
+
+Analytics is a read-only aggregation layer over the existing transactional tables - not a separate data store, ETL pipeline, or warehouse:
+
+```text
+leads, appointments, applications, conversations,
+messages, voice_sessions, support_tickets, unanswered_questions
+                       |
+        college_id + created_at filter (composite index)
+                       |
+        SQL COUNT / GROUP BY / AVG (app/analytics/service.py)
+                       |
+        college-timezone-aware date range (app/analytics/dates.py)
+                       |
+        GET /api/v1/analytics/overview | /trends
+```
+
+Every metric is computed on demand from live rows already written by the leads/appointments/applications/conversations/voice/support subsystems; there is no analytics-specific write path, no background aggregation job, and no cache in front of it (correctness first - add a short tenant- and range-aware cache later only if load testing shows it is warranted). Tenant isolation and RBAC reuse the exact `resolve_tenant_college_id` / `require_permission` mechanisms every other router uses - analytics introduces no new authorization concept. See docs/api-contract.md section 64 for the endpoint contract and metric definitions, including which AI-operations metrics are intentionally reported as unavailable rather than approximated.
+
 
 
