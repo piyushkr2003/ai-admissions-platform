@@ -2684,3 +2684,57 @@ Backend:
 
 Frontend: `tests/voice-console.test.tsx` gained a "live mode" section - no manual transcript composer is shown once the LiveKit provider is active (the worker performs STT server-side), the transcript panel polls and renders the real persisted conversation, and the worker's remote audio track is attached to the page's `<audio>` element for playback.
 
+## Nova Demo Data (Nova Demo Integration Addendum)
+
+`nova_demo_data/` at the repo root is the canonical, fictional Nova Institute of Technology demo dataset (`nova_demo_seed.json` - structured facts; `nova_demo_knowledge_base.md` and `nova_faqs.csv` - RAG content). `app/db/nova_demo.py` maps it onto the existing schema and services - no new tables, no Nova-specific branch in the agent, tools, or RAG pipeline. It is entirely separate from the general test fixture in `app/db/seed.py` (`seed_demo_data`, used by most of the backend test suite); the two are compatible (`bootstrap_nova_demo` upserts whichever "Nova Institute of Technology" row already exists, by slug, rather than creating a second one) but neither calls the other.
+
+### Loading the demo data
+
+```bash
+cd backend
+python scripts/bootstrap_nova_demo.py
+```
+
+This creates the Nova tenant if it does not exist, or upserts it in place if it does, then:
+courses, course eligibility rules, scholarships, admission dates, required documents, counselors, counselor availability, and FAQs (structured tables) - plus ingests the knowledge-base markdown and FAQ CSV through the real `IngestionService` (RAG). Running it again is a no-op: every write is keyed on a natural identity (college slug, course code, scholarship name, admission-date title, document name, counselor email, FAQ question, or knowledge-source content hash), and `IngestionService.ingest` already skips re-ingesting unchanged content for the same college.
+
+### Resetting/reseeding
+
+```bash
+python scripts/bootstrap_nova_demo.py --reset
+```
+
+`--reset` deletes only Nova's ingested `knowledge_sources`/`knowledge_chunks` (so the next bootstrap re-ingests the knowledge base/FAQs from scratch), then runs the normal upsert bootstrap. It never touches leads, appointments, applications, or other interaction history, and never touches another tenant. Never run `--reset` (or the plain bootstrap) against a production database - this is fictional demo data only.
+
+### What is fictional
+
+Everything under `nova_demo_data/` and everything it produces: the college itself, its courses/fees/scholarships/dates/documents/counselors/availability/FAQs, and the ingested knowledge base (`nova_demo_knowledge_base.md` states this in its own header, and the college's `feature_flags.demo_only` is set to `true`). "Nova Institute of Technology" does not represent any real institution.
+
+### Verifying RAG ingestion
+
+```python
+from sqlalchemy import select
+from app.models.college import College
+from app.models.knowledge import KnowledgeSource
+nova = db.execute(select(College).where(College.slug == "nova-institute-of-technology")).scalar_one()
+db.execute(select(KnowledgeSource).where(KnowledgeSource.college_id == nova.id)).scalars().all()
+# -> 2 sources ("Nova Demo Knowledge Base", "Nova Demo FAQs"), status "ready"
+```
+
+Or exercise retrieval directly: `RetrievalService(db).search(college_id=nova.id, query="Is hostel available?")` should return reliable evidence; the same query against a different `college_id` must not.
+
+### Running the demo workflow
+
+With the backend running and Nova bootstrapped, drive the same conversation `tests/test_nova_demo.py::test_full_nova_demo_workflow_through_orchestrator` exercises against `POST /api/v1/conversations` + `POST /api/v1/conversations/{id}/messages` (see the Task 006 addendum above for the request shapes): course question -> eligibility -> fee -> scholarship -> counselor availability -> booking -> application draft. Every structured fact in the responses comes from a database-backed tool call (visible via `tools_used` on the admin-only `/api/v1/agent/test` endpoint); hostel/placement questions are answered via Nova-scoped RAG.
+
+### Mapping notes / known limitations
+
+- `courses[].annual_other_fee_inr` has no dedicated `Course` column - it is recorded in `Course.description` and in the ingested knowledge base/FAQ text rather than inventing a new fee column.
+- The dataset's college-wide `hostel`/`placements` objects are applied identically to every Nova course, since `Course.hostel_available`/`hostel_fee`/`placement_summary` are per-course columns (the only existing representation).
+- `availability[]` gives specific-date sample slots; `CounselorAvailability` only models a recurring weekly schedule, so each sample slot's time-of-day is applied Monday-Friday (matching the convention already used by `app/db/seed.py`), not just the one sample date.
+- The Women in Technology scholarship (restricted to two courses) is stored as one college-wide `Scholarship` row with the restriction stated in `eligibility_criteria` text, since `Scholarship.course_id` is a single nullable foreign key, not a many-to-many relationship.
+
+### Testing
+
+`tests/test_nova_demo.py` covers: bootstrap on an empty database and idempotent rerun, upserting an already-seeded legacy Nova row without duplication, `--reset` re-ingestion without duplicating chunks, structured field mapping (fees/eligibility/scholarships/dates/documents/counselors/availability), RAG ingestion and Nova-scoped retrieval, tenant isolation across structured data/RAG/counselor availability/the agent, direct agent-tool calls proving structured facts come from the database (not an LLM), and the full demo conversation end to end through the real `AgentOrchestrator` (course -> eligibility -> fee -> scholarship -> counselor -> booking -> lead -> application draft).
+

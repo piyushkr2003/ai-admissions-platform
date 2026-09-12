@@ -1,0 +1,247 @@
+{
+  "name": "Nova Institute of Technology",
+  "slug": "nova-institute-of-technology",
+  "demo_only": true,
+  "location": {
+    "city": "Mangaluru",
+    "state": "Karnataka",
+    "country": "India",
+    "timezone": "Asia/Kolkata"
+  },
+  "academic_year": "2027-28",
+  "application_fee_inr": 1000,
+  "application_open": "2026-11-01",
+  "priority_deadline": "2027-04-30",
+  "final_deadline": "2027-06-15",
+  "contact": {
+    "phone": "+91 90000 10001",
+    "email": "admissions@nova-demo.edu"
+  },
+  "languages": [
+    "en",
+    "hi",
+    "hinglish"
+  ],
+  "courses": [
+    {
+      "code": "BTECH-CSE",
+      "name": "B.Tech Computer Science and Engineering",
+      "level": "UG",
+      "duration_years": 4,
+      "seats": 120,
+      "annual_tuition_inr": 185000,
+      "annual_other_fee_inr": 25000,
+      "minimum_aggregate_percent": 60,
+      "required_subjects": [
+        "Physics",
+        "Mathematics"
+      ],
+      "routes": [
+        "NOVA-AT",
+        "JEE Main",
+        "merit"
+      ]
+    },
+    {
+      "code": "BTECH-AIML",
+      "name": "B.Tech Artificial Intelligence and Machine Learning",
+      "level": "UG",
+      "duration_years": 4,
+      "seats": 60,
+      "annual_tuition_inr": 195000,
+      "annual_other_fee_inr": 25000,
+      "minimum_aggregate_percent": 60,
+      "required_subjects": [
+        "Physics",
+        "Mathematics"
+      ],
+      "routes": [
+        "NOVA-AT",
+        "JEE Main",
+        "merit"
+      ]
+    },
+    {
+      "code": "BCA",
+      "name": "Bachelor of Computer Applications",
+      "level": "UG",
+      "duration_years": 3,
+      "seats": 90,
+      "annual_tuition_inr": 110000,
+      "annual_other_fee_inr": 15000,
+      "minimum_aggregate_percent": 50,
+      "required_subjects": [],
+      "routes": [
+        "merit"
+      ]
+    },
+    {
+      "code": "MBA",
+      "name": "Master of Business Administration",
+      "level": "PG",
+      "duration_years": 2,
+      "seats": 60,
+      "annual_tuition_inr": 210000,
+      "annual_other_fee_inr": 20000,
+      "minimum_aggregate_percent": 50,
+      "required_subjects": [],
+      "routes": [
+        "NOVA-MAT",
+        "CAT",
+        "MAT",
+        "CMAT",
+        "merit"
+      ]
+    },
+    {
+      "code": "MCA",
+      "name": "Master of Computer Applications",
+      "level": "PG",
+      "duration_years": 2,
+      "seats": 60,
+      "annual_tuition_inr": 165000,
+      "annual_other_fee_inr": 15000,
+      "minimum_aggregate_percent": 50,
+      "required_subjects": [
+        "Mathematics"
+      ],
+      "routes": [
+        "NOVA-MAT",
+        "NIMCET",
+        "merit"
+      ]
+    }
+  ],
+  "scholarships": [
+    {
+      "code": "NOVA-MERIT",
+      "name": "Nova Merit Scholarship",
+      "benefit": "25% tuition fee waiver",
+      "eligibility": "90% or above in qualifying examination"
+    },
+    {
+      "code": "NOVA-EXCELLENCE",
+      "name": "Nova Academic Excellence Scholarship",
+      "benefit": "15% tuition fee waiver",
+      "eligibility": "80% to 89.99% in qualifying examination"
+    },
+    {
+      "code": "NOVA-GIRLS-TECH",
+      "name": "Women in Technology Scholarship",
+      "benefit": "10% tuition fee waiver",
+      "eligibility": "Female students admitted to B.Tech CSE or B.Tech AI & ML"
+    }
+  ],
+  "important_dates": [
+    {
+      "event": "Applications open",
+      "date": "2026-11-01"
+    },
+    {
+      "event": "Priority application deadline",
+      "date": "2027-04-30"
+    },
+    {
+      "event": "Final application deadline",
+      "date": "2027-06-15"
+    },
+    {
+      "event": "NOVA-AT Session 1",
+      "date": "2027-03-20"
+    },
+    {
+      "event": "NOVA-AT Session 2",
+      "date": "2027-05-22"
+    },
+    {
+      "event": "Counselling begins",
+      "date": "2027-06-25"
+    }
+  ],
+  "documents": [
+    "Recent passport-size photograph",
+    "Government-issued identity proof",
+    "Class 10 certificate/marksheet",
+    "Class 12 certificate/marksheet for undergraduate applicants",
+    "Bachelor's degree/provisional certificate for PG applicants",
+    "Entrance examination scorecard where applicable",
+    "Category certificate if applicable"
+  ],
+  "counselors": [
+    {
+      "name": "Ananya Rao",
+      "role": "Senior Admissions Counselor",
+      "languages": [
+        "en",
+        "hi",
+        "hinglish"
+      ]
+    },
+    {
+      "name": "Rahul Menon",
+      "role": "Admissions Counselor",
+      "languages": [
+        "en",
+        "hi"
+      ]
+    },
+    {
+      "name": "Meera Nair",
+      "role": "PG Admissions Counselor",
+      "languages": [
+        "en",
+        "hi",
+        "hinglish"
+      ]
+    }
+  ],
+  "availability": [
+    {
+      "counselor": "Ananya Rao",
+      "date": "2027-04-12",
+      "start": "10:00",
+      "end": "10:30"
+    },
+    {
+      "counselor": "Ananya Rao",
+      "date": "2027-04-12",
+      "start": "15:00",
+      "end": "15:30"
+    },
+    {
+      "counselor": "Rahul Menon",
+      "date": "2027-04-12",
+      "start": "11:00",
+      "end": "11:30"
+    },
+    {
+      "counselor": "Rahul Menon",
+      "date": "2027-04-12",
+      "start": "16:00",
+      "end": "16:30"
+    },
+    {
+      "counselor": "Meera Nair",
+      "date": "2027-04-12",
+      "start": "14:00",
+      "end": "14:30"
+    }
+  ],
+  "hostel": {
+    "available": true,
+    "annual_fee_inr": 95000,
+    "accommodation": "Separate boys' and girls' hostels",
+    "includes": [
+      "Room",
+      "Basic utilities",
+      "Wi-Fi in common areas",
+      "Laundry"
+    ]
+  },
+  "placements": {
+    "placement_rate_percent": 92,
+    "average_package_lpa": 6.8,
+    "highest_package_lpa": 18.0,
+    "demo_only": true
+  }
+}
