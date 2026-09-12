@@ -2604,3 +2604,36 @@ This section records what Task 011 actually built against the design above, so t
 
 See `docs/development.md` for the full environment variable list and local development instructions.
 
+---
+
+# 72. Task 015 Implementation Status (Addendum)
+
+Task 015 adds a real `RealtimeTransportProvider` adapter for web voice - LiveKit - behind the exact same interface Task 011 defined, plus a browser client that actually opens a LiveKit room and captures the microphone. Nothing about `AgentOrchestrator`, `VoiceSessionService`, the event contract, or the turn-taking state machine changed: this is strictly a new adapter selected by configuration (docs/voice.md section 4, "provider adapters").
+
+## 72.1 What is implemented
+
+- `app/voice/providers/livekit.py`: `LiveKitTransportProvider`, selected via `VOICE_TRANSPORT_PROVIDER=livekit`. `create_session()` mints a real, spec-compliant LiveKit access token (HS256 JWT with `sub`/`iss`/`nbf`/`exp` claims and a `video` grants object - `roomJoin`, `room`, `canPublish`, `canSubscribe`, `canPublishData`) using PyJWT directly, matching what LiveKit's own server SDKs produce byte-for-byte. `LIVEKIT_API_SECRET` signs the token and is never returned, logged, or reachable from the frontend.
+- Tenant isolation is enforced in the room name itself: every room is `college-{college_id}-voice-{session_id}`, so a token can never be replayed to join a different tenant's room even if a session id were guessed.
+- `app/voice/providers/factory.py::get_transport_provider()` fails closed with `ResourceUnavailableError` (HTTP 503) if `livekit` is selected without all three of `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` - it never silently falls back to the mock transport. `Settings.validate_for_production()` additionally fails application startup outright under the same condition when `APP_ENV=production`, so a misconfigured production deployment never even starts serving traffic.
+- `POST /api/v1/voice/sessions` now returns `provider` (`"mock"` or `"livekit"`) and `server_url` (the LiveKit endpoint the client connects to; `null` for mock) alongside the existing `connection_token`. The frontend uses `provider` - never an assumption - to label a session MOCK or LIVE.
+- Frontend: `frontend/features/voice/voice-console.tsx`, a staff-facing (RBAC-gated, `voice_sessions:write`) test console at `/dashboard/voice/console`, per docs/voice.md section 61's requirement for a local/test voice mode. It requests microphone permission, connects to the LiveKit room with the `livekit-client` browser SDK when `provider === "livekit"`, and drives the existing REST event contract (`POST /voice/sessions/{id}/events`) for transcript submission and playback exactly as the mock/phone channels already do - see 72.2 for why STT/TTS were not re-architected around LiveKit's own media pipeline.
+- Frontend connection-state handling: microphone-permission denial, LiveKit `disconnected`/`reconnecting`/`reconnected` room events, session-creation failure, and idle/max-duration termination messages returned by the backend are all surfaced distinctly rather than a single generic error.
+- Barge-in: submitting a new transcript while the agent's audio is still playing stops local playback immediately and sends an `interruption` event first, so the existing server-side TTS-cancel/turn-state barge-in logic (docs/voice.md section 17) is triggered from the LiveKit client exactly as it already is from the mock/phone test harness.
+
+## 72.2 What remains provider-dependent / not implemented
+
+- **No LiveKit Agents worker joins the room.** LiveKit is integrated as the *realtime audio transport* (microphone capture, encrypted WebRTC connection, connection-quality/reconnect handling) - it proves a real, authenticated media session exists. It is not yet the carrier for the agent's own speech: speech-to-text and text-to-speech continue to run through the same `STTProvider`/`TTSProvider` interfaces and the same REST event contract used by the mock and phone channels (browser transcript in, `audio_url` back, played locally). Publishing the agent's synthesized audio *into* the LiveKit room itself - so a LiveKit-native client hears it as a normal room participant rather than via a separate `<audio>` element - requires a persistent server-side LiveKit Agents worker process joining the room, which is a distinct, larger infrastructure task and has not been built here. This is a transport integration, not a claim that phone-call-quality full-duplex LiveKit audio routing is complete.
+- **No telephony/SIP integration was added or changed.** `TelephonyProvider` and the phone voice flow are exactly as Task 011 left them; Task 015 is web-voice-only.
+- `LiveKitTransportProvider.close_session()` is intentionally best-effort logging only, not a real LiveKit room-deletion API call (mirrors `TTSProvider.cancel()`'s existing "must never raise" contract) - an empty LiveKit room closes on its own via the server's configured `empty_timeout`. Real room administration (via the `livekit-api` RoomServiceClient) can be added later without changing this interface.
+- A genuine LiveKit smoke test (dialing a real `LIVEKIT_URL` with real credentials) was **not** performed in this environment because no real LiveKit project credentials were available. Only local, network-free tests (JWT construction/verification, tenant-scoped room naming, provider selection, fail-closed behavior) were run - see `tests/test_voice_livekit.py`.
+
+## 72.3 Configuration
+
+```text
+VOICE_TRANSPORT_PROVIDER=mock   # or "livekit"
+LIVEKIT_URL=                    # e.g. wss://your-project.livekit.cloud - required if livekit selected
+LIVEKIT_API_KEY=                # required if livekit selected
+LIVEKIT_API_SECRET=             # required if livekit selected - server-side only, never sent to the browser
+LIVEKIT_TOKEN_TTL_SECONDS=600
+```
+

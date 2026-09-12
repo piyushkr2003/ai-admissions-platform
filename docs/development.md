@@ -2599,3 +2599,31 @@ Backed by `app/analytics/` (`dates.py`, `service.py`, `router.py`); see docs/api
 
 `tests/analytics-api.test.ts` (API client: query params per range, response shape pass-through, 401/403 propagation, no legacy endpoint calls), `tests/analytics-date-range.test.ts` (pure validation/formatting logic), and `tests/analytics-page.test.tsx` (component: all five date-range presets, custom-range validation, loading/empty/error states, partial failure between overview and trends, 403 access-denied state, platform_admin tenant switching, college-scoped role locking, sparse/zero trend rendering).
 
+## Realtime LiveKit Voice (Task 015 Addendum)
+
+See docs/voice.md sections 71-72 for the full architecture, what is/isn't implemented, and known limitations.
+
+### Environment variables
+
+```text
+VOICE_TRANSPORT_PROVIDER=mock   # "mock" (default) or "livekit"
+LIVEKIT_URL=                    # e.g. wss://your-project.livekit.cloud
+LIVEKIT_API_KEY=
+LIVEKIT_API_SECRET=             # server-side only - never sent to the frontend
+LIVEKIT_TOKEN_TTL_SECONDS=600
+```
+
+Selecting `livekit` without all three credentials raises `RESOURCE_UNAVAILABLE` at session-creation time, and fails application startup outright when `APP_ENV=production` - it never falls back to mock silently.
+
+### Local development
+
+1. Leave `VOICE_TRANSPORT_PROVIDER=mock` (default) - no LiveKit account needed to exercise the full session/event/agent lifecycle, exactly as in Task 011.
+2. To test with a real LiveKit project: set the three `LIVEKIT_*` variables, restart the backend, and open `/dashboard/voice/console` in the frontend (requires `voice_sessions:write`). The console requests microphone access, connects to the LiveKit room with the token returned by `POST /api/v1/voice/sessions`, and drives the conversation through the same event endpoints the mock/phone channels use.
+3. The console clearly labels the active session **MOCK** or **LIVE (LiveKit)** based on the backend's own `provider` field in the session-creation response - never an assumption made client-side.
+
+### Testing
+
+Backend: `tests/test_voice_livekit.py` - provider selection/mode switching, fail-closed behavior (partial credentials, production startup), JWT token construction and verification (claims, HS256 signature, TTL), tenant-isolated room naming, secret/token non-leakage into logs, end-to-end session creation via the API, reconnect/idempotency parity with the mock transport, and confirmation that `final_transcript` still drives the one existing `AgentOrchestrator` (no second agent path). No network calls are made; a real LiveKit smoke test requires real project credentials, which were not available in this environment.
+
+Frontend: `tests/voice-console.test.tsx` - mock vs. live labeling, microphone-permission denial, LiveKit connection/reconnection/disconnection states, session-creation and event-submission failures, and barge-in triggering an `interruption` event. `livekit-client`'s `Room` is mocked (`vi.mock`) since jsdom has no WebRTC stack.
+

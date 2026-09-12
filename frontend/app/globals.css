@@ -1246,3 +1246,61 @@ ul.stack-tight {
     grid-template-columns: 1fr;
   }
 }
+
+.voice-console__start {
+  display: grid;
+  gap: 14px;
+  justify-items: start;
+}
+
+.voice-console__live {
+  display: grid;
+  gap: 14px;
+}
+
+.voice-console__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.voice-console__transcript {
+  display: grid;
+  gap: 10px;
+  max-height: 360px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 14px;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.voice-console__entry {
+  display: grid;
+  gap: 2px;
+  font-size: 0.92rem;
+}
+
+.voice-console__entry strong {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.voice-console__entry--system {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.voice-console__composer {
+  display: flex;
+  gap: 10px;
+}
+
+.voice-console__composer .form-input {
+  flex: 1;
+}

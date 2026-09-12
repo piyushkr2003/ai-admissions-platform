@@ -44,6 +44,18 @@ def get_transport_provider() -> RealtimeTransportProvider:
     name = settings.voice_transport_provider.lower()
     if name == "mock":
         return MockTransportProvider()
+    if name == "livekit":
+        if not (settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret):
+            raise ResourceUnavailableError(
+                "Voice transport provider 'livekit' is selected but LIVEKIT_URL, LIVEKIT_API_KEY, "
+                "and LIVEKIT_API_SECRET are not all configured."
+            )
+        from app.voice.providers.livekit import LiveKitTransportProvider
+
+        return LiveKitTransportProvider(
+            url=settings.livekit_url, api_key=settings.livekit_api_key,
+            api_secret=settings.livekit_api_secret, ttl_seconds=settings.livekit_token_ttl_seconds,
+        )
     if not settings.voice_provider_api_key:
         raise ResourceUnavailableError(f"Voice transport provider '{name}' is selected but no VOICE_PROVIDER_API_KEY is configured.")
     raise ResourceUnavailableError(f"Voice transport provider '{name}' has no adapter implemented yet.")

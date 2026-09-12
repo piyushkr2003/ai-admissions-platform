@@ -1,0 +1,329 @@
+"use client";
+
+import { Mic, PhoneOff, RadioTower } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { TextInput } from "@/components/ui/form";
+import { Notice } from "@/components/ui/notice";
+import { PageHeader } from "@/features/dashboard/page-header";
+import {
+  describeMicrophoneError,
+  describeTerminationReason,
+  isPlayableAudioUrl,
+  labelForMode,
+} from "@/features/voice/voice-console-helpers";
+import { useAuth } from "@/features/auth/auth-provider";
+import { useTenant } from "@/features/tenant/tenant-provider";
+import { ApiError } from "@/lib/api/client";
+import { voiceApi } from "@/lib/api/voice";
+import { connectVoiceRoom, type VoiceRoomHandle } from "@/lib/voice/livekit-room";
+import { hasFrontendPermission } from "@/lib/rbac";
+import type { VoiceSessionCreateResponse } from "@/types/voice";
+
+type ConsoleStatus =
+  | "idle"
+  | "requesting_mic"
+  | "creating_session"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "ended"
+  | "mic_denied"
+  | "error";
+
+type TranscriptEntry = {
+  id: string;
+  speaker: "student" | "agent" | "system";
+  text: string;
+};
+
+let entryCounter = 0;
+function nextEntryId(): string {
+  entryCounter += 1;
+  return `entry-${entryCounter}`;
+}
+
+export function VoiceConsole() {
+  const { apiClient, user } = useAuth();
+  const { collegeId, loading: tenantLoading } = useTenant();
+
+  const canUse = user ? hasFrontendPermission(user.role, "voice_sessions:write") : false;
+
+  const [status, setStatus] = useState<ConsoleStatus>("idle");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [session, setSession] = useState<VoiceSessionCreateResponse | null>(null);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [draft, setDraft] = useState("");
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [endedMessage, setEndedMessage] = useState<string | null>(null);
+
+  const roomRef = useRef<VoiceRoomHandle | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const appendEntry = useCallback((speaker: TranscriptEntry["speaker"], text: string) => {
+    setTranscript((current) => [...current, { id: nextEntryId(), speaker, text }]);
+  }, []);
+
+  const stopLocalMic = useCallback(() => {
+    micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micStreamRef.current = null;
+  }, []);
+
+  const cleanupConnection = useCallback(async () => {
+    if (roomRef.current) {
+      try {
+        await roomRef.current.disconnect();
+      } catch {
+        // best-effort teardown - the room may already be gone
+      }
+      roomRef.current = null;
+    }
+    stopLocalMic();
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+    setIsAgentSpeaking(false);
+  }, [stopLocalMic]);
+
+  useEffect(() => {
+    return () => {
+      void cleanupConnection();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function handleStart() {
+    if (!collegeId) {
+      return;
+    }
+    setErrorMessage(null);
+    setEndedMessage(null);
+    setTranscript([]);
+    setStatus("requesting_mic");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+    } catch (micError) {
+      setStatus("mic_denied");
+      setErrorMessage(describeMicrophoneError(micError));
+      return;
+    }
+
+    setStatus("creating_session");
+    let created: VoiceSessionCreateResponse;
+    try {
+      const response = await voiceApi.createSession(apiClient, collegeId);
+      created = response.data;
+    } catch (createError) {
+      stopLocalMic();
+      setStatus("error");
+      setErrorMessage(createError instanceof ApiError ? createError.message : "Could not start a voice session.");
+      return;
+    }
+
+    setSession(created);
+    appendEntry("agent", created.greeting.text);
+
+    if (created.provider === "livekit") {
+      if (!created.server_url) {
+        setStatus("error");
+        setErrorMessage("The voice provider did not return a connection endpoint.");
+        return;
+      }
+      setStatus("connecting");
+      try {
+        stopLocalMic(); // the LiveKit room manages its own mic track from here
+        roomRef.current = await connectVoiceRoom(created.server_url, created.connection_token, {
+          onDisconnected: () => {
+            setStatus((current) => (current === "ended" ? current : "error"));
+          },
+          onReconnecting: () => setStatus("reconnecting"),
+          onReconnected: () => setStatus("connected"),
+        });
+      } catch (connectError) {
+        setStatus("error");
+        setErrorMessage(
+          connectError instanceof DOMException
+            ? describeMicrophoneError(connectError)
+            : "Could not connect to the realtime voice server. Please try again.",
+        );
+        return;
+      }
+    }
+
+    setStatus("connected");
+  }
+
+  async function handleSubmitTranscript(event: React.FormEvent) {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || !session) {
+      return;
+    }
+    setDraft("");
+
+    if (isAgentSpeaking) {
+      audioRef.current?.pause();
+      setIsAgentSpeaking(false);
+      try {
+        await voiceApi.postEvent(apiClient, session.session_id, { event_type: "interruption" });
+      } catch {
+        // best-effort - the session may already have moved on
+      }
+      appendEntry("system", "(interrupted)");
+    }
+
+    appendEntry("student", text);
+
+    try {
+      const response = await voiceApi.postEvent(apiClient, session.session_id, {
+        event_type: "final_transcript",
+        text,
+      });
+      const body = response.data;
+      if (body.status === "completed" || body.status === "failed") {
+        appendEntry("system", body.response_text ?? "This session has ended.");
+        await cleanupConnection();
+        setEndedMessage(body.response_text ?? describeTerminationReason(body.status));
+        setStatus("ended");
+        return;
+      }
+      if (body.response_text) {
+        appendEntry("agent", body.response_text);
+      }
+      if (isPlayableAudioUrl(body.audio_url) && audioRef.current) {
+        audioRef.current.src = body.audio_url;
+        setIsAgentSpeaking(true);
+        void audioRef.current.play().catch(() => setIsAgentSpeaking(false));
+      }
+    } catch (eventError) {
+      setErrorMessage(eventError instanceof ApiError ? eventError.message : "Could not reach the voice agent.");
+      setStatus("error");
+    }
+  }
+
+  async function handleEnd() {
+    let terminationReason: string | null = "client_disconnect";
+    if (session) {
+      try {
+        const response = await voiceApi.endSession(apiClient, session.session_id, "completed");
+        terminationReason = response.data.termination_reason ?? terminationReason;
+      } catch {
+        // the session may already be over server-side; proceed to tear down locally regardless
+      }
+    }
+    await cleanupConnection();
+    setEndedMessage(describeTerminationReason(terminationReason));
+    setStatus("ended");
+  }
+
+  if (!canUse) {
+    return (
+      <div className="page-stack">
+        <PageHeader eyebrow="Voice Infrastructure" title="Voice Console">
+          Live microphone test console for the AI admissions voice agent.
+        </PageHeader>
+        <Notice tone="warning">You do not have permission to use the voice test console.</Notice>
+      </div>
+    );
+  }
+
+  const mode = session?.provider;
+
+  return (
+    <div className="page-stack">
+      <PageHeader eyebrow="Voice Infrastructure" title="Voice Console">
+        Start a real microphone session against the AI admissions agent - the same orchestrator, tools, and
+        tenant used by every other channel.
+      </PageHeader>
+
+      {mode ? (
+        <Notice tone={mode === "livekit" ? "info" : "warning"}>
+          {mode === "livekit"
+            ? "This session is using the real LiveKit realtime transport."
+            : "This session is using the mock voice transport - no real audio provider is connected in this environment."}
+        </Notice>
+      ) : null}
+
+      <Card
+        actions={mode ? <Badge tone={mode === "livekit" ? "success" : "neutral"}>{labelForMode(mode)}</Badge> : undefined}
+        title="Session"
+      >
+        {status === "idle" || status === "mic_denied" || status === "error" || status === "ended" ? (
+          <div className="voice-console__start">
+            <Button
+              disabled={tenantLoading || !collegeId}
+              icon={<Mic size={16} aria-hidden="true" />}
+              onClick={() => void handleStart()}
+            >
+              Start voice session
+            </Button>
+            {status === "mic_denied" && errorMessage ? (
+              <Notice tone="warning">
+                {errorMessage} You can continue using text-based support or contact admissions directly.
+              </Notice>
+            ) : null}
+            {status === "error" && errorMessage ? <Notice tone="warning">{errorMessage}</Notice> : null}
+            {status === "ended" ? <Notice tone="info">{endedMessage ?? "The voice session has ended."}</Notice> : null}
+          </div>
+        ) : null}
+
+        {status === "requesting_mic" ? <p role="status">Requesting microphone access…</p> : null}
+        {status === "creating_session" ? <p role="status">Starting voice session…</p> : null}
+        {status === "connecting" ? <p role="status">Connecting to the realtime voice server…</p> : null}
+        {status === "reconnecting" ? (
+          <Notice tone="warning">Connection lost - attempting to reconnect…</Notice>
+        ) : null}
+
+        {status === "connected" || status === "reconnecting" ? (
+          <div className="voice-console__live">
+            <div className="voice-console__status" role="status">
+              <RadioTower aria-hidden="true" size={16} />
+              <span>{isAgentSpeaking ? "Agent speaking…" : "Listening"}</span>
+            </div>
+
+            <ol aria-label="Conversation transcript" className="voice-console__transcript">
+              {transcript.map((entry) => (
+                <li className={`voice-console__entry voice-console__entry--${entry.speaker}`} key={entry.id}>
+                  <strong>{entry.speaker === "student" ? "You" : entry.speaker === "agent" ? "Agent" : ""}</strong>
+                  <span>{entry.text}</span>
+                </li>
+              ))}
+            </ol>
+
+            <form className="voice-console__composer" onSubmit={(event) => void handleSubmitTranscript(event)}>
+              <TextInput
+                aria-label="Transcript input"
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder={
+                  mode === "livekit"
+                    ? "Type what you said (speech-to-text bridge)"
+                    : "Type a student message to simulate speech"
+                }
+                value={draft}
+              />
+              <Button type="submit">Send</Button>
+            </form>
+
+            <audio
+              onEnded={() => setIsAgentSpeaking(false)}
+              onError={() => setIsAgentSpeaking(false)}
+              onPause={() => setIsAgentSpeaking(false)}
+              ref={audioRef}
+            >
+              <track kind="captions" />
+            </audio>
+
+            <Button icon={<PhoneOff size={16} aria-hidden="true" />} onClick={() => void handleEnd()} variant="danger">
+              End session
+            </Button>
+          </div>
+        ) : null}
+      </Card>
+    </div>
+  );
+}

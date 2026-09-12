@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     voice_session_idle_timeout_seconds: int = 60
     voice_max_concurrent_sessions_per_college: int = 20
 
+    # Realtime web voice transport (Task 015) - set VOICE_TRANSPORT_PROVIDER=livekit
+    # and all three of these to use real LiveKit infrastructure instead of the
+    # mock transport. LIVEKIT_API_SECRET signs short-lived room-join tokens
+    # server-side and must never be sent to the frontend.
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    livekit_token_ttl_seconds: int = 600
+
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"
@@ -84,6 +93,13 @@ class Settings(BaseSettings):
             problems.append("APP_DEBUG must be false in production")
         if "*" in self.cors_origins_list:
             problems.append("CORS_ALLOWED_ORIGINS must not be a wildcard in production")
+        if self.voice_transport_provider.lower() == "livekit" and not (
+            self.livekit_url and self.livekit_api_key and self.livekit_api_secret
+        ):
+            problems.append(
+                "LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must all be set in production "
+                "when VOICE_TRANSPORT_PROVIDER=livekit"
+            )
         if problems:
             raise RuntimeError(
                 "Invalid production configuration: " + "; ".join(problems)

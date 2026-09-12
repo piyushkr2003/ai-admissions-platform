@@ -34,6 +34,11 @@ class TransportCredentials:
     connection_token: str
     expires_at: datetime
     ice_servers: list[dict] = field(default_factory=list)
+    # Public transport endpoint the client connects to (e.g. a LiveKit
+    # `wss://` URL). Not a secret - it identifies a server, not a
+    # credential - but is None for transports (like the mock) that have
+    # no separate connection endpoint of their own.
+    server_url: str | None = None
 
 
 @dataclass

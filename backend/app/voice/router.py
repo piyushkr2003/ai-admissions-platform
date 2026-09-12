@@ -96,6 +96,8 @@ def create_session(payload: VoiceSessionCreate, db: Session = Depends(get_db)) -
         "conversation_id": str(conversation.id),
         "status": session.status,
         "language": session.language,
+        "provider": session.provider,
+        "server_url": credentials.server_url,
         "connection_token": credentials.connection_token,
         "connection_expires_at": credentials.expires_at.isoformat(),
         "ice_servers": credentials.ice_servers,

@@ -4637,6 +4637,8 @@ Response:
     "conversation_id": "conv_123",
     "status": "connecting",
     "language": "en",
+    "provider": "livekit",
+    "server_url": "wss://example.livekit.cloud",
     "connection_token": "...",
     "connection_expires_at": "2026-09-20T15:05:00+00:00",
     "ice_servers": [],
@@ -4649,7 +4651,7 @@ Response:
 }
 ```
 
-`connection_token` is short-lived and scoped to this session; it is what a real WebRTC/LiveKit client presents to open the realtime media connection. Only `channel: "web_voice"` may be created through this endpoint - phone sessions are created by the telephony webhook.
+`connection_token` is short-lived and scoped to this session; it is what the real LiveKit client presents to open the realtime media connection. `provider` is `"mock"` or `"livekit"` (selected by `VOICE_TRANSPORT_PROVIDER`, Task 015) - the frontend must use this field, not assume one, to label a session MOCK vs LIVE. `server_url` is the LiveKit server/cloud project endpoint the client connects to; it is `null` for the mock provider (no real transport session exists) and is not itself a secret - `LIVEKIT_API_SECRET` never leaves the backend, and the returned `connection_token` is a short-lived JWT scoped to exactly one room (see docs/voice.md section 71 addendum for Task 015). Only `channel: "web_voice"` may be created through this endpoint - phone sessions are created by the telephony webhook.
 
 ### `GET /api/v1/voice/sessions/{session_id}`
 
