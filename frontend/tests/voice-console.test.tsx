@@ -59,9 +59,10 @@ type MockOptions = {
   createSession?: { status: number; body: unknown };
   events?: Array<{ status: number; body: unknown }>;
   endSession?: { status: number; body: unknown };
+  messages?: () => Array<{ role: string; content: string; timestamp: string }>;
 };
 
-function mockFetch({ createSession, events = [], endSession }: MockOptions) {
+function mockFetch({ createSession, events = [], endSession, messages }: MockOptions) {
   let eventCallIndex = 0;
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
@@ -93,6 +94,9 @@ function mockFetch({ createSession, events = [], endSession }: MockOptions) {
         body: { data: { id: "sess-1", termination_reason: "client_disconnect", status: "completed" }, meta: { request_id: "req_1" } },
       };
       return jsonResponse(body, status);
+    }
+    if (url.includes("/messages")) {
+      return jsonResponse({ data: messages ? messages() : [], meta: { request_id: "req_1" } });
     }
     throw new Error(`Unexpected request in test: ${url}`);
   });
@@ -177,6 +181,62 @@ describe("VoiceConsole - mock vs live labeling", () => {
     expect(connectVoiceRoom).toHaveBeenCalledWith(
       "wss://fake.livekit.cloud", "signed-jwt", expect.any(Object),
     );
+  });
+});
+
+describe("VoiceConsole - live mode (realtime worker, Task 016)", () => {
+  const LIVEKIT_CREATE_SESSION = {
+    status: 201,
+    body: {
+      data: {
+        session_id: "sess-live", conversation_id: "conv-live", status: "connecting", language: "en",
+        provider: "livekit", server_url: "wss://fake.livekit.cloud", connection_token: "signed-jwt",
+        connection_expires_at: "2026-01-01T00:00:00Z", ice_servers: [], greeting: mockGreeting(),
+      },
+      meta: { request_id: "req_1" },
+    },
+  };
+
+  it("does not show a manual transcript composer - the worker performs speech recognition server-side", async () => {
+    vi.mocked(connectVoiceRoom).mockResolvedValue({ room: {} as never, disconnect: vi.fn() });
+    mockFetch({ createSession: LIVEKIT_CREATE_SESSION, messages: () => [] });
+    renderConsole();
+    await clickStart();
+
+    await screen.findByText("LIVE (LiveKit)");
+    expect(screen.queryByLabelText(/transcript input/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/listening to your microphone/i)).toBeInTheDocument();
+  });
+
+  it("polls and renders the persisted conversation transcript", async () => {
+    vi.mocked(connectVoiceRoom).mockResolvedValue({ room: {} as never, disconnect: vi.fn() });
+    mockFetch({
+      createSession: LIVEKIT_CREATE_SESSION,
+      messages: () => [
+        { role: "ai", content: "Hello! Welcome to Nova Institute admissions.", timestamp: "2026-01-01T00:00:00Z" },
+        { role: "student", content: "What is the fee for CSE?", timestamp: "2026-01-01T00:00:05Z" },
+        { role: "ai", content: "The current tuition fee is 1,50,000.", timestamp: "2026-01-01T00:00:07Z" },
+      ],
+    });
+    renderConsole();
+    await clickStart();
+
+    expect(await screen.findByText("What is the fee for CSE?")).toBeInTheDocument();
+    expect(await screen.findByText("The current tuition fee is 1,50,000.")).toBeInTheDocument();
+  });
+
+  it("attaches the worker's remote audio track to the audio element for playback", async () => {
+    const attach = vi.fn();
+    vi.mocked(connectVoiceRoom).mockImplementation(async (_url, _token, handlers) => {
+      handlers?.onRemoteAudioTrack?.({ attach } as never);
+      return { room: {} as never, disconnect: vi.fn() };
+    });
+    mockFetch({ createSession: LIVEKIT_CREATE_SESSION, messages: () => [] });
+    renderConsole();
+    await clickStart();
+
+    await screen.findByText("LIVE (LiveKit)");
+    expect(attach).toHaveBeenCalledTimes(1);
   });
 });
 

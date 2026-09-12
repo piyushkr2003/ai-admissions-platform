@@ -39,9 +39,15 @@ class Settings(BaseSettings):
     rag_top_k: int = 5
     knowledge_max_file_size_mb: int = 15
 
-    # Agent / LLM
+    # Agent / LLM - "mock" (default) never calls out; the LLM is only ever
+    # used for bounded conversational reasoning (open-ended/small-talk
+    # phrasing), never as the source of truth for admissions facts - see
+    # app/agent/providers/ and the orchestrator's _open_ended_reply (Task 016).
     agent_llm_provider: str = "mock"
     llm_api_key: str = ""
+    llm_model: str = "claude-sonnet-4-5-20250929"
+    llm_api_base_url: str = "https://api.anthropic.com"
+    llm_timeout_seconds: float = 8.0
     agent_max_tool_calls_per_turn: int = 6
 
     # Future providers
@@ -72,6 +78,14 @@ class Settings(BaseSettings):
     livekit_api_secret: str = ""
     livekit_token_ttl_seconds: int = 600
 
+    # Realtime voice agent worker (Task 016) - a separate process that joins
+    # a LiveKit room, performs STT, drives the existing AgentOrchestrator,
+    # and publishes synthesized speech back. Irrelevant/unused in mock mode.
+    livekit_worker_identity: str = "admissions-agent"
+    voice_worker_poll_interval_seconds: float = 2.0
+    voice_worker_sample_rate: int = 48000
+    voice_worker_channels: int = 1
+
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"
@@ -99,6 +113,10 @@ class Settings(BaseSettings):
             problems.append(
                 "LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must all be set in production "
                 "when VOICE_TRANSPORT_PROVIDER=livekit"
+            )
+        if self.agent_llm_provider.lower() not in ("mock",) and not self.llm_api_key:
+            problems.append(
+                f"LLM_API_KEY must be set in production when AGENT_LLM_PROVIDER={self.agent_llm_provider}"
             )
         if problems:
             raise RuntimeError(

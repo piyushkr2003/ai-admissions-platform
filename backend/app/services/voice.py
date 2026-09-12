@@ -364,7 +364,12 @@ class VoiceSessionService:
     def _remember_event(self, session: VoiceSession, event_id: str | None, result: dict) -> None:
         if event_id:
             session.last_event_id = event_id
-            session.last_event_result = result
+            # Leading-underscore keys (e.g. _tts_audio_bytes) are internal-only
+            # for a same-process caller and are never JSON-serializable /
+            # never persisted - a replayed duplicate event simply won't
+            # re-carry them, which is fine since nothing re-publishes audio
+            # for an exact-retry anyway.
+            session.last_event_result = {k: v for k, v in result.items() if not k.startswith("_")}
             self.db.flush()
 
     def _handle_final_transcript(
@@ -394,11 +399,13 @@ class VoiceSessionService:
 
         settings = _voice_settings_for(self._agent_config(session.college_id))
         t1 = time.perf_counter()
+        audio_bytes: bytes | None = None
         try:
             tts_result = get_tts_provider().synthesize(
                 turn_result.response_text, language=conversation.language, voice_id=settings.get("voice_id"),
             )
             audio_url, audio_duration_ms, tts_error = tts_result.audio_url, tts_result.duration_ms, None
+            audio_bytes = tts_result.audio_bytes
         except ResourceUnavailableError as exc:
             logger.warning("voice.tts_failed session_id=%s error=%s", session.id, exc.message)
             audio_url, audio_duration_ms, tts_error = None, 0, "tts_unavailable"
@@ -420,6 +427,13 @@ class VoiceSessionService:
             "agent_latency_ms": agent_latency_ms,
             "tts_latency_ms": tts_latency_ms,
             "turn_state": session.turn_state,
+            # Internal only - raw synthesized audio for a same-process caller
+            # (the realtime voice worker, Task 016) that needs to publish it
+            # into a LiveKit room. Never part of the public HTTP contract:
+            # every JSON-facing call site must pop this key before enveloping
+            # the result (see app/voice/router.py) since it is not
+            # JSON-serializable and was never intended for a browser anyway.
+            "_tts_audio_bytes": audio_bytes,
         }
 
     # ------------------------------------------------------------------

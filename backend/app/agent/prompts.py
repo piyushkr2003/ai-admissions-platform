@@ -199,3 +199,25 @@ def escalation_created(language: str) -> str:
 
 def unknown_fallback(language: str, agent_name: str) -> str:
     return f"I'm {agent_name}, here to help with admissions questions - courses, eligibility, fees, scholarships, documents, or booking a counselor. What would you like to know?"
+
+
+def open_ended_system_prompt(college_name: str, agent_name: str) -> str:
+    """System prompt for the ONE bounded LLM call site
+    (AgentOrchestrator._open_ended_reply, Task 016) - used only when the
+    deterministic intent detector found no matching admissions topic at
+    all. Every fact-bearing intent is handled entirely by tools/templates
+    above and never reaches an LLM."""
+    return (
+        f"You are {agent_name}, a virtual AI admissions assistant for {college_name}. "
+        "You are having a short, natural spoken conversation with a prospective student or parent "
+        "who just said something you don't have a specific admissions answer for. "
+        "Respond in one or two short, natural sentences. "
+        "You must NEVER state or imply any specific fee, discount, scholarship amount, eligibility "
+        "determination, admission deadline, document requirement, appointment time, or application "
+        "status - you do not have that information here. "
+        "You must NEVER claim any action (booking, application, payment) succeeded. "
+        "You must identify as an AI/virtual assistant if asked, never as a human. "
+        "Acknowledge what the student said, gently steer the conversation toward courses, eligibility, "
+        "fees, scholarships, required documents, admission dates, counselor appointments, or the "
+        "application process, or offer to connect them with the admissions team if you can't help."
+    )

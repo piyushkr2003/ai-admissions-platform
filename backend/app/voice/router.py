@@ -121,6 +121,7 @@ def post_event(session_id: uuid.UUID, payload: VoiceEventCreate, db: Session = D
         db.rollback()
         raise
     db.commit()
+    result.pop("_tts_audio_bytes", None)  # internal-only; never part of the HTTP contract
     return envelope(result)
 
 
@@ -249,6 +250,7 @@ def _process_telephony_webhook(db: Session, provider_name: str, headers: dict, r
             db.rollback()
             raise
         db.commit()
+        result.pop("_tts_audio_bytes", None)  # internal-only; never part of the HTTP contract
         return envelope(result)
 
     if event.event_type == "call_ended":

@@ -17,10 +17,13 @@ import {
 import { useAuth } from "@/features/auth/auth-provider";
 import { useTenant } from "@/features/tenant/tenant-provider";
 import { ApiError } from "@/lib/api/client";
+import { conversationsApi } from "@/lib/api/conversations";
 import { voiceApi } from "@/lib/api/voice";
 import { connectVoiceRoom, type VoiceRoomHandle } from "@/lib/voice/livekit-room";
 import { hasFrontendPermission } from "@/lib/rbac";
 import type { VoiceSessionCreateResponse } from "@/types/voice";
+
+const TRANSCRIPT_POLL_INTERVAL_MS = 2000;
 
 type ConsoleStatus =
   | "idle"
@@ -95,6 +98,44 @@ export function VoiceConsole() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const mode = session?.provider;
+
+  // Live mode has no client-side transcript of its own - the realtime
+  // worker (Task 016) drives the conversation entirely server-side, so
+  // the transcript panel here just mirrors the canonical, already-
+  // persisted Conversation/Message history via the existing staff
+  // conversations API, exactly like the transcript drawer on the
+  // Conversations page.
+  useEffect(() => {
+    if (mode !== "livekit" || !session || (status !== "connected" && status !== "reconnecting")) {
+      return;
+    }
+    let active = true;
+    const poll = async () => {
+      try {
+        const response = await conversationsApi.messages(apiClient, session.conversation_id);
+        if (!active) {
+          return;
+        }
+        setTranscript(
+          response.data.map((message, index) => ({
+            id: `${index}-${message.timestamp}`,
+            speaker: message.role === "student" ? "student" : message.role === "ai" ? "agent" : "system",
+            text: message.content,
+          })),
+        );
+      } catch {
+        // transient - the next poll tick will retry
+      }
+    };
+    void poll();
+    const interval = setInterval(() => void poll(), TRANSCRIPT_POLL_INTERVAL_MS);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [apiClient, mode, session, status]);
+
   async function handleStart() {
     if (!collegeId) {
       return;
@@ -143,6 +184,15 @@ export function VoiceConsole() {
           },
           onReconnecting: () => setStatus("reconnecting"),
           onReconnected: () => setStatus("connected"),
+          // The realtime voice worker (Task 016) publishes the agent's
+          // synthesized speech as a normal room audio track - attach it
+          // directly rather than relying on the REST audio_url path,
+          // which live mode no longer uses.
+          onRemoteAudioTrack: (track) => {
+            if (audioRef.current) {
+              track.attach(audioRef.current);
+            }
+          },
         });
       } catch (connectError) {
         setStatus("error");
@@ -232,8 +282,6 @@ export function VoiceConsole() {
     );
   }
 
-  const mode = session?.provider;
-
   return (
     <div className="page-stack">
       <PageHeader eyebrow="Voice Infrastructure" title="Voice Console">
@@ -253,6 +301,21 @@ export function VoiceConsole() {
         actions={mode ? <Badge tone={mode === "livekit" ? "success" : "neutral"}>{labelForMode(mode)}</Badge> : undefined}
         title="Session"
       >
+        {/* Always mounted (even before "connected") so a LiveKit
+            TrackSubscribed event - which can fire as soon as the room
+            connects, before this component's own status flips to
+            "connected" - always has a real element to attach to. */}
+        <audio
+          autoPlay
+          onEnded={() => setIsAgentSpeaking(false)}
+          onError={() => setIsAgentSpeaking(false)}
+          onPause={() => setIsAgentSpeaking(false)}
+          onPlaying={() => setIsAgentSpeaking(true)}
+          ref={audioRef}
+        >
+          <track kind="captions" />
+        </audio>
+
         {status === "idle" || status === "mic_denied" || status === "error" || status === "ended" ? (
           <div className="voice-console__start">
             <Button
@@ -295,28 +358,22 @@ export function VoiceConsole() {
               ))}
             </ol>
 
-            <form className="voice-console__composer" onSubmit={(event) => void handleSubmitTranscript(event)}>
-              <TextInput
-                aria-label="Transcript input"
-                onChange={(event) => setDraft(event.target.value)}
-                placeholder={
-                  mode === "livekit"
-                    ? "Type what you said (speech-to-text bridge)"
-                    : "Type a student message to simulate speech"
-                }
-                value={draft}
-              />
-              <Button type="submit">Send</Button>
-            </form>
-
-            <audio
-              onEnded={() => setIsAgentSpeaking(false)}
-              onError={() => setIsAgentSpeaking(false)}
-              onPause={() => setIsAgentSpeaking(false)}
-              ref={audioRef}
-            >
-              <track kind="captions" />
-            </audio>
+            {mode === "livekit" ? (
+              <Notice tone="info">
+                The realtime voice worker is listening to your microphone and recognizing speech directly - the
+                transcript above updates automatically as the conversation progresses.
+              </Notice>
+            ) : (
+              <form className="voice-console__composer" onSubmit={(event) => void handleSubmitTranscript(event)}>
+                <TextInput
+                  aria-label="Transcript input"
+                  onChange={(event) => setDraft(event.target.value)}
+                  placeholder="Type a student message to simulate speech"
+                  value={draft}
+                />
+                <Button type="submit">Send</Button>
+              </form>
+            )}
 
             <Button icon={<PhoneOff size={16} aria-hidden="true" />} onClick={() => void handleEnd()} variant="danger">
               End session

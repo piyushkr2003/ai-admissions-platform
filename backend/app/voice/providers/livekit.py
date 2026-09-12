@@ -27,16 +27,28 @@ from app.voice.providers.base import RealtimeTransportProvider, TransportCredent
 logger = logging.getLogger("app.voice.livekit")
 
 
-def _room_name(*, college_id: str, session_id: str) -> str:
+def room_name_for(*, college_id: str, session_id: str) -> str:
     """College id is embedded in the room name itself so a token can
     never be replayed to join a room belonging to a different tenant's
-    session, even if the raw session_id were guessed."""
+    session, even if the raw session_id were guessed. Public because the
+    realtime worker (app/voice/worker/) needs to derive the exact same
+    room name to join the session's room as a second (agent) participant."""
     return f"college-{college_id}-voice-{session_id}"
 
 
-def _build_access_token(
+# Backward-compatible alias (Task 015 named this privately; kept so any
+# existing import site/tests keep working unchanged).
+_room_name = room_name_for
+
+
+def mint_access_token(
     *, api_key: str, api_secret: str, identity: str, room: str, ttl_seconds: int,
+    can_publish: bool = True, can_subscribe: bool = True,
 ) -> tuple[str, datetime]:
+    """Builds one spec-compliant LiveKit access token. Public so both the
+    student's browser credential (LiveKitTransportProvider below) and the
+    worker's own server-identity credential (app/voice/worker/) share
+    exactly one JWT-construction implementation."""
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=ttl_seconds)
     claims = {
@@ -48,13 +60,16 @@ def _build_access_token(
         "video": {
             "roomJoin": True,
             "room": room,
-            "canPublish": True,
-            "canSubscribe": True,
+            "canPublish": can_publish,
+            "canSubscribe": can_subscribe,
             "canPublishData": True,
         },
     }
     token = jwt.encode(claims, api_secret, algorithm="HS256")
     return token, expires_at
+
+
+_build_access_token = mint_access_token
 
 
 class LiveKitTransportProvider(RealtimeTransportProvider):
@@ -75,9 +90,9 @@ class LiveKitTransportProvider(RealtimeTransportProvider):
         self._ttl_seconds = ttl_seconds
 
     def create_session(self, *, session_id: str, college_id: str, metadata: dict) -> TransportCredentials:
-        room = _room_name(college_id=college_id, session_id=session_id)
+        room = room_name_for(college_id=college_id, session_id=session_id)
         identity = f"student-{session_id}"
-        token, expires_at = _build_access_token(
+        token, expires_at = mint_access_token(
             api_key=self._api_key, api_secret=self._api_secret,
             identity=identity, room=room, ttl_seconds=self._ttl_seconds,
         )

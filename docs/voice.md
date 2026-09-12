@@ -2622,7 +2622,7 @@ Task 015 adds a real `RealtimeTransportProvider` adapter for web voice - LiveKit
 
 ## 72.2 What remains provider-dependent / not implemented
 
-- **No LiveKit Agents worker joins the room.** LiveKit is integrated as the *realtime audio transport* (microphone capture, encrypted WebRTC connection, connection-quality/reconnect handling) - it proves a real, authenticated media session exists. It is not yet the carrier for the agent's own speech: speech-to-text and text-to-speech continue to run through the same `STTProvider`/`TTSProvider` interfaces and the same REST event contract used by the mock and phone channels (browser transcript in, `audio_url` back, played locally). Publishing the agent's synthesized audio *into* the LiveKit room itself - so a LiveKit-native client hears it as a normal room participant rather than via a separate `<audio>` element - requires a persistent server-side LiveKit Agents worker process joining the room, which is a distinct, larger infrastructure task and has not been built here. This is a transport integration, not a claim that phone-call-quality full-duplex LiveKit audio routing is complete.
+- **(Resolved in Task 016.)** No LiveKit Agents worker joined the room as of Task 015 - see section 73 below for the realtime voice worker that now does.
 - **No telephony/SIP integration was added or changed.** `TelephonyProvider` and the phone voice flow are exactly as Task 011 left them; Task 015 is web-voice-only.
 - `LiveKitTransportProvider.close_session()` is intentionally best-effort logging only, not a real LiveKit room-deletion API call (mirrors `TTSProvider.cancel()`'s existing "must never raise" contract) - an empty LiveKit room closes on its own via the server's configured `empty_timeout`. Real room administration (via the `livekit-api` RoomServiceClient) can be added later without changing this interface.
 - A genuine LiveKit smoke test (dialing a real `LIVEKIT_URL` with real credentials) was **not** performed in this environment because no real LiveKit project credentials were available. Only local, network-free tests (JWT construction/verification, tenant-scoped room naming, provider selection, fail-closed behavior) were run - see `tests/test_voice_livekit.py`.
@@ -2636,4 +2636,82 @@ LIVEKIT_API_KEY=                # required if livekit selected
 LIVEKIT_API_SECRET=             # required if livekit selected - server-side only, never sent to the browser
 LIVEKIT_TOKEN_TTL_SECONDS=600
 ```
+
+---
+
+# 73. Task 016 Implementation Status (Addendum) - Realtime Voice Agent Worker + LLM
+
+Task 016 closes the gap Task 015 documented above: a real process now joins the LiveKit room as the agent, performs speech recognition on the student's audio, drives the AI admissions agent, and publishes synthesized speech back - a genuine two-way realtime conversation, not just a transport connection.
+
+## 73.1 Architecture
+
+```text
+Student microphone
+      |
+LiveKit room (real WebRTC, Task 015)
+      |
+app/voice/worker/room_client.py         <- thin livekit.rtc wrapper (normalizes
+      |                                     raw room events; not itself unit-tested,
+      |                                     no real LiveKit server is reachable here)
+app/voice/worker/session_worker.py      <- RealtimeVoiceWorker: buffers audio using
+      |                                     LiveKit's own active_speakers_changed
+      |                                     signal as VAD, then:
+      |
+STTProvider.recognize()                 <- same interface/mocks as Task 011
+      |
+VoiceSessionService.record_event()      <- the EXACT method app/voice/router.py's
+      |                                     POST /voice/sessions/{id}/events already
+      |                                     calls - no second admissions brain
+      |
+AgentOrchestrator.handle_message()      <- unchanged since Task 006; all typed tools,
+      |                                     RAG, lead/appointment/application/
+      |                                     escalation logic, Conversation/Message
+      |                                     persistence
+      |
+TTSProvider.synthesize()                <- same interface/mocks as Task 011
+      |
+room_client.publish_audio()             <- raw PCM16 frames -> LiveKit AudioSource
+      |
+LiveKit room -> student hears the agent
+```
+
+`app/voice/worker/dispatcher.py` (`WorkerDispatcher`) polls for `VoiceSession` rows using the `livekit` transport and runs one `RealtimeVoiceWorker` per session as an asyncio task - deliberately not LiveKit Agents' own job-dispatch protocol (docs/development.md section 5: don't add infrastructure with nothing to test it against here). `app/voice/worker/run.py` is the CLI entrypoint (`python -m app.voice.worker.run`).
+
+## 73.2 Providers
+
+- **STT/TTS/RealtimeTransport**: unchanged interfaces from Task 011/015 (`app/voice/providers/base.py`). `MockTTSProvider` now also returns real (synthetic, non-speech) PCM16 WAV `audio_bytes` - not just a duration estimate - so the worker's publish-into-LiveKit code path is exercised by tests without a paid vendor.
+- **LLM** (`app/agent/providers/`): `LLMProvider`/`MockLLMProvider` already existed from Task 006, unused until now. Task 016 adds `AnthropicLLMProvider` (`app/agent/providers/anthropic.py`, selected via `AGENT_LLM_PROVIDER=anthropic` + `LLM_API_KEY`) and `app/agent/providers/factory.py::get_llm_provider()`, mirroring every other provider factory's fail-closed pattern. Implemented with `urllib.request` (already using PyJWT-not-livekit-api's reasoning from Task 015) rather than the `anthropic` SDK - one bounded JSON POST doesn't need it.
+
+## 73.3 Where the LLM is (and is not) used
+
+**The LLM is never the source of truth for admissions facts.** `AgentOrchestrator` is unchanged for every intent that has a tool/template answer - fees, eligibility, scholarships, dates, documents, counselor availability, appointments, applications all come from tools/`prompts.py` exactly as before, regardless of which LLM provider is configured (see `tests/test_orchestrator_llm_fallback.py::test_llm_is_never_invoked_for_a_grounded_fee_question`, which configures a "lying" fake LLM and proves it is never even called for a fee question).
+
+The LLM is consulted in exactly one place: `AgentOrchestrator._open_ended_reply()`, reached only when the deterministic intent detector matched nothing at all (genuinely open-ended input). With the default `AGENT_LLM_PROVIDER=mock`, this returns the pre-Task-016 static `prompts.unknown_fallback()` text verbatim - zero behavior change for every existing test. With a real provider configured, it asks the LLM to naturally acknowledge the input and steer toward a supported topic, under a system prompt (`prompts.open_ended_system_prompt`) that explicitly forbids stating any fact, number, date, or claiming an action succeeded. Any LLM failure/timeout falls back to the static template - the LLM can never block or break a turn.
+
+Safety refusals (`out_of_scope`, `cross_tenant_refusal`, `injection_refusal`) are never routed through the LLM - they stay fully static regardless of configuration.
+
+## 73.4 Turn-taking / VAD / barge-in
+
+VAD is LiveKit's own `active_speakers_changed` room signal (translated into `on_speaking_started`/`on_speaking_stopped` by `room_client.py`), not a hand-rolled ML model - the transport server already computes this. Barge-in: a `speaking_started` callback while `VoiceSession.turn_state == SPEAKING` (checked via the existing `state_machine.is_barge_in()` from Task 011, not re-implemented) immediately signals the in-flight `publish_audio` loop to stop via an `asyncio.Event`, awaits it, then records an `interruption` event through the same `VoiceSessionService` used everywhere else - the state machine, TTS-cancel call, and audit logging are all the existing Task 011 code, unchanged.
+
+## 73.5 Conversation memory
+
+Unchanged from Task 006: `AgentState` persists on `Conversation.state` between turns. The worker doesn't add or need any new memory mechanism - `tests/test_voice_worker.py::test_conversation_memory_does_not_re_ask_for_known_course` drives "I want B.Tech CSE." then "I scored 82% in Class 12." through the worker and confirms the second turn doesn't re-ask for the course.
+
+## 73.6 Tenant isolation
+
+The LiveKit room name (`college-{college_id}-voice-{session_id}`, from Task 015's `room_name_for`) already prevents cross-tenant room collisions. The worker additionally only ever operates within the `CollegeContext` resolved from the `VoiceSession.college_id` it was dispatched for - the exact same tenant-scoping object every other channel uses, so RAG/tools/leads/appointments/applications are scoped identically. `tests/test_voice_worker.py` covers: two colleges' sessions mint tokens for different rooms, and a Nova session cannot retrieve a document ingested only for Aurora.
+
+## 73.7 What was NOT live-tested (no real credentials/infrastructure available)
+
+- No real LiveKit server was dialed. `app/voice/worker/room_client.py` (the `livekit.rtc` wrapper) is exercised only implicitly through `RealtimeVoiceWorker`'s tests, which substitute an in-memory `FakeRoomClient` - see `tests/test_voice_worker.py`'s module docstring.
+- No real STT/TTS vendor was called - `MockSTTProvider`/`MockTTSProvider` throughout, as in every prior voice task.
+- No real Anthropic API call was made - `tests/test_llm_provider.py` monkeypatches `urllib.request.urlopen` to verify request construction and response parsing without network access.
+- Given the above, end-to-end audio quality, real-world STT accuracy, LiveKit reconnect timing, and Anthropic response latency/quality are unverified in this environment. The turn-taking, tenant isolation, tool-invocation, and fallback *logic* are verified against the real database and the real `AgentOrchestrator`.
+
+## 73.8 Known limitations
+
+- One dispatcher process, in-memory claim tracking (documented scope boundary, section above) - a multi-instance deployment needs a DB-level claim column, not a different `RealtimeVoiceWorker`.
+- `VoiceSessionService` calls run synchronously on the worker's own asyncio task rather than via `asyncio.to_thread` - fine for one session per worker instance; a design serving many sessions per process should offload this.
+- STT still processes a whole buffered utterance at once (`STTProvider.recognize`), not a true streaming/partial-transcript STT vendor integration - consistent with the interface Task 011 defined.
 

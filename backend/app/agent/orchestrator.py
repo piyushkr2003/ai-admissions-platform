@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 
 from app.agent import guardrails, intents as I, prompts, slots as S
 from app.agent.language import detect_language
+from app.agent.providers.base import LLMMessage, LLMProviderError
+from app.agent.providers.factory import get_llm_provider
 from app.agent.schemas import ToolCallRecord, ToolResult
 from app.agent.state import AgentState
 from app.agent.tools import admissions, applications, appointments, courses, eligibility
@@ -178,7 +180,8 @@ class AgentOrchestrator:
             escalation_required = True
 
         if not response_parts:
-            response_parts.append(prompts.unknown_fallback(state.language, self._agent_name()))
+            fallback = prompts.unknown_fallback(state.language, self._agent_name())
+            response_parts.append(self._open_ended_reply(conversation, user_text, fallback))
 
         response_text = " ".join(part for part in response_parts if part).strip()
 
@@ -457,6 +460,35 @@ class AgentOrchestrator:
 
     def _agent_name(self) -> str:
         return "Admissions Assistant"
+
+    def _open_ended_reply(self, conversation: Conversation, user_text: str, fallback: str) -> str:
+        """Bounded LLM assist (Task 016) for input that matched NO
+        admissions intent at all. Every fact-bearing response elsewhere in
+        this orchestrator always comes from prompts.py/tools, never from
+        here - the LLM only ever gets a chance to phrase a natural
+        redirect for genuinely open-ended input.
+
+        Returns `fallback` verbatim (a) when the configured provider is
+        "mock" (the default - guarantees zero behavior change for every
+        deterministic test), or (b) on any provider failure/timeout, so a
+        slow or broken LLM can never block or break a turn."""
+        if self.settings.agent_llm_provider.lower() == "mock":
+            return fallback
+        try:
+            llm = get_llm_provider()
+            response = llm.generate([
+                LLMMessage(role="system", content=prompts.open_ended_system_prompt(self.college.name, self._agent_name())),
+                LLMMessage(role="user", content=user_text),
+            ])
+        except LLMProviderError as exc:
+            logger.warning("agent.llm_open_ended_failed conversation_id=%s error=%s", conversation.id, exc)
+            return fallback
+        except Exception:  # noqa: BLE001 - the LLM is an optional enhancement, never a hard dependency
+            logger.exception("agent.llm_open_ended_unexpected_error conversation_id=%s", conversation.id)
+            return fallback
+
+        text = guardrails.keep_voice_friendly(response.content, max_sentences=3).strip()
+        return text or fallback
 
     @staticmethod
     def _friendly_time(iso_value: str) -> str:

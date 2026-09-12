@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
+import math
+import struct
 import uuid
+import wave
 from datetime import datetime, timedelta, timezone
 
 from app.voice.providers.base import (
@@ -26,6 +30,31 @@ from app.voice.providers.base import (
 )
 
 _WORDS_PER_MINUTE_SPOKEN = 150  # rough spoken-word rate, used only to fake a duration
+_MOCK_TTS_SAMPLE_RATE = 16000
+
+
+def _synthetic_wav_bytes(duration_ms: int, *, seed: str) -> bytes:
+    """A tiny, deterministic mono PCM16 WAV buffer standing in for real
+    speech - NOT synthesized speech, just enough real, valid audio data
+    for the realtime voice worker's LiveKit-publish code path
+    (app/voice/worker/) to be exercised end-to-end in tests without a
+    paid TTS vendor. A low-amplitude tone (not silence) so tests can
+    assert the buffer carries non-trivial audio data."""
+    sample_rate = _MOCK_TTS_SAMPLE_RATE
+    num_samples = max(1, int(sample_rate * max(duration_ms, 1) / 1000))
+    frequency = 220 + (int(seed[:4], 16) % 220)  # deterministic per text, cosmetic only
+    amplitude = 3000
+    frames = bytearray()
+    for i in range(num_samples):
+        value = int(amplitude * math.sin(2 * math.pi * frequency * i / sample_rate))
+        frames += struct.pack("<h", value)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(bytes(frames))
+    return buffer.getvalue()
 
 
 class MockSTTProvider(STTProvider):
@@ -51,7 +80,8 @@ class MockTTSProvider(TTSProvider):
         word_count = max(1, len(text.split()))
         duration_ms = int(word_count / _WORDS_PER_MINUTE_SPOKEN * 60_000)
         ref = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
-        return TTSResult(audio_url=f"mock://tts/{ref}", audio_bytes=None, duration_ms=duration_ms, provider_ref=ref)
+        audio_bytes = _synthetic_wav_bytes(duration_ms, seed=ref)
+        return TTSResult(audio_url=f"mock://tts/{ref}", audio_bytes=audio_bytes, duration_ms=duration_ms, provider_ref=ref)
 
     def cancel(self, provider_ref: str) -> None:
         return None

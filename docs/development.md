@@ -2627,3 +2627,60 @@ Backend: `tests/test_voice_livekit.py` - provider selection/mode switching, fail
 
 Frontend: `tests/voice-console.test.tsx` - mock vs. live labeling, microphone-permission denial, LiveKit connection/reconnection/disconnection states, session-creation and event-submission failures, and barge-in triggering an `interruption` event. `livekit-client`'s `Room` is mocked (`vi.mock`) since jsdom has no WebRTC stack.
 
+## Realtime Voice Agent Worker + LLM (Task 016 Addendum)
+
+See docs/voice.md section 73 for the full architecture, provider boundaries, and what was/wasn't live-tested.
+
+### Environment variables
+
+```text
+# LLM (bounded fallback only - see docs/voice.md 73.3; agent works fully without this)
+AGENT_LLM_PROVIDER=mock         # "mock" (default) or "anthropic"
+LLM_API_KEY=                    # required if AGENT_LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-5-20250929
+LLM_API_BASE_URL=https://api.anthropic.com
+LLM_TIMEOUT_SECONDS=8.0
+
+# Realtime voice worker (irrelevant while VOICE_TRANSPORT_PROVIDER=mock)
+LIVEKIT_WORKER_IDENTITY=admissions-agent
+VOICE_WORKER_POLL_INTERVAL_SECONDS=2.0
+VOICE_WORKER_SAMPLE_RATE=48000
+VOICE_WORKER_CHANNELS=1
+```
+
+Selecting `AGENT_LLM_PROVIDER=anthropic` without `LLM_API_KEY` raises `RESOURCE_UNAVAILABLE` the moment the LLM is actually consulted (not at startup, since the LLM is optional), and fails application startup outright when `APP_ENV=production` - the same fail-closed pattern as every other provider.
+
+### Local development
+
+To run everything, in separate terminals:
+
+```text
+# 1. Database
+docker run -p 5432:5432 -e POSTGRES_USER=admissions -e POSTGRES_PASSWORD=admissions -e POSTGRES_DB=admissions postgres:16
+
+# 2. Backend
+cd backend && uvicorn app.main:app --reload
+
+# 3. Frontend
+cd frontend && npm run dev
+
+# 4. Realtime voice worker - only needed when VOICE_TRANSPORT_PROVIDER=livekit;
+#    with the default mock provider there is nothing for it to dispatch to.
+cd backend && python -m app.voice.worker.run
+```
+
+With `VOICE_TRANSPORT_PROVIDER=mock` (default), skip step 4 entirely and use the mock voice console flow exactly as documented in the Task 011/015 addenda above - no LiveKit account, LLM key, or worker process required.
+
+To exercise the full realtime path: set `VOICE_TRANSPORT_PROVIDER=livekit` and the `LIVEKIT_*` credentials, start the worker (step 4), then open `/dashboard/voice/console` - the console shows **LIVE (LiveKit)**, connects your microphone, and the transcript panel polls the real persisted conversation as the worker drives it.
+
+### Testing
+
+Backend:
+- `tests/test_llm_provider.py` - provider selection/fail-closed behavior, Anthropic request construction/response parsing, timeout/HTTP-error/malformed-response handling, no-secret-logging. No network calls (`urllib.request.urlopen` is monkeypatched).
+- `tests/test_orchestrator_llm_fallback.py` - proves the LLM is never invoked for a grounded/factual intent (even with a "lying" fake LLM configured), that safety refusals stay fully static, that the default mock provider reproduces the exact pre-Task-016 static text, and that any LLM failure falls back gracefully.
+- `tests/test_voice_pcm.py` - pure-Python WAV/PCM helpers (round-trip, RMS energy, frame chunking) used by the worker; no dependency beyond the standard library.
+- `tests/test_voice_worker.py` - the realtime worker's full lifecycle against an in-memory `FakeRoomClient` stand-in for `livekit.rtc` (no real LiveKit server is reachable here): session/room-token mapping, tenant isolation, a full grounded-fee-lookup turn with real audio published back, eligibility lookup, conversation memory across turns, appointment booking parity with the existing REST-level test, barge-in, participant/room disconnect handling, worker crash recovery, prompt-injection resistance, and cross-tenant knowledge isolation.
+- `tests/test_voice_worker_dispatcher.py` - claim/release/dispatch logic against the real test database.
+
+Frontend: `tests/voice-console.test.tsx` gained a "live mode" section - no manual transcript composer is shown once the LiveKit provider is active (the worker performs STT server-side), the transcript panel polls and renders the real persisted conversation, and the worker's remote audio track is attached to the page's `<audio>` element for playback.
+

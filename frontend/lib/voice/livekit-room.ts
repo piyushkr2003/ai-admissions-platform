@@ -7,12 +7,16 @@
  * is what makes the voice console testable under jsdom, which has no
  * WebRTC stack at all.
  */
-import { Room, RoomEvent, type DisconnectReason } from "livekit-client";
+import { RemoteTrack, Room, RoomEvent, Track, type DisconnectReason } from "livekit-client";
 
 export type VoiceRoomHandlers = {
   onDisconnected?: (reason: DisconnectReason | undefined) => void;
   onReconnecting?: () => void;
   onReconnected?: () => void;
+  /** Fires once the realtime voice worker (Task 016) publishes its
+   * synthesized speech into the room - the caller attaches this to an
+   * `<audio>` element to actually hear the agent. */
+  onRemoteAudioTrack?: (track: RemoteTrack) => void;
 };
 
 export type VoiceRoomHandle = {
@@ -38,6 +42,11 @@ export async function connectVoiceRoom(
   room.on(RoomEvent.Disconnected, (reason) => handlers.onDisconnected?.(reason));
   room.on(RoomEvent.Reconnecting, () => handlers.onReconnecting?.());
   room.on(RoomEvent.Reconnected, () => handlers.onReconnected?.());
+  room.on(RoomEvent.TrackSubscribed, (track) => {
+    if (track.kind === Track.Kind.Audio) {
+      handlers.onRemoteAudioTrack?.(track);
+    }
+  });
 
   await room.connect(serverUrl, token);
   await room.localParticipant.setMicrophoneEnabled(true);

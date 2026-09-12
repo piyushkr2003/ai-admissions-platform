@@ -35,3 +35,13 @@ class LLMProvider(ABC):
     @abstractmethod
     def generate(self, messages: list[LLMMessage], *, temperature: float = 0.2) -> LLMResponse:
         raise NotImplementedError
+
+
+class LLMProviderError(Exception):
+    """Raised for a runtime provider failure (timeout, HTTP error,
+    malformed response) as opposed to a configuration problem (missing
+    credential, which the factory raises as ResourceUnavailableError
+    before any call is attempted). Callers that treat the LLM as an
+    optional enhancement - e.g. AgentOrchestrator's open-ended reply -
+    catch this and fall back to a deterministic response rather than
+    failing the turn."""
