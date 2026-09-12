@@ -51,6 +51,18 @@ class Settings(BaseSettings):
     storage_access_key: str = ""
     storage_secret_key: str = ""
 
+    # Voice (Task 011) - provider names default to the deterministic mock
+    # adapter; selecting anything else without the matching credential
+    # above configured raises a clear error rather than pretending to work.
+    stt_provider: str = "mock"
+    tts_provider: str = "mock"
+    voice_transport_provider: str = "mock"
+    telephony_provider: str = "mock"
+    telephony_webhook_secret: str = ""
+    voice_session_max_duration_seconds: int = 1800
+    voice_session_idle_timeout_seconds: int = 60
+    voice_max_concurrent_sessions_per_college: int = 20
+
     @property
     def is_production(self) -> bool:
         return self.app_env.lower() == "production"

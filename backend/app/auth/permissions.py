@@ -17,6 +17,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "knowledge:read", "knowledge:write",
         "analytics:read",
         "agent_config:read", "agent_config:write",
+        "voice_sessions:read", "voice_sessions:write",
     },
     "admissions_staff": {
         "college_configuration:read",
@@ -28,6 +29,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "knowledge:read", "knowledge:write",
         "analytics:read",
         "agent_config:read",
+        "voice_sessions:read", "voice_sessions:write",
     },
     "counselor": {
         "college_configuration:read",
@@ -39,6 +41,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "knowledge:read",
         "analytics:read",
         "agent_config:read",
+        "voice_sessions:read",
     },
 }
 

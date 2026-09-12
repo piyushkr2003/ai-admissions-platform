@@ -17,6 +17,7 @@ from app.conversations.router import router as conversations_router
 from app.knowledge.router import router as knowledge_router
 from app.leads.router import router as leads_router
 from app.support.router import router as support_router
+from app.voice.router import router as voice_router
 
 api_router = APIRouter()
 api_router.include_router(health.router)
@@ -31,3 +32,4 @@ api_router.include_router(counselors_router)
 api_router.include_router(appointments_router)
 api_router.include_router(applications_router)
 api_router.include_router(support_router)
+api_router.include_router(voice_router)

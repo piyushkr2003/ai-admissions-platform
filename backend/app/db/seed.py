@@ -216,6 +216,18 @@ def _seed_nova(db: Session) -> dict:
             "cold_max": 39,
             "warm_max": 69,
         },
+        voice_phone_number="+91-9800000099",
+        voice_settings={
+            "web_enabled": True,
+            "phone_enabled": True,
+            "default_language": "en",
+            "fallback_language": "en",
+            "voice_id": "nova-assist-default",
+            "session_idle_timeout_seconds": 60,
+            "max_session_duration_seconds": 1800,
+            "recording_enabled": False,
+            "transcript_enabled": True,
+        },
         active=True,
     ))
 

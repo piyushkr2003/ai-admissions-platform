@@ -2578,3 +2578,29 @@ The AI may sound human-like.
 
 The underlying system must remain predictable, observable, secure, and verifiable.
 
+---
+
+# 71. Task 011 Implementation Status (Addendum)
+
+This section records what Task 011 actually built against the design above, so the gap between architectural intent and running code is explicit rather than assumed.
+
+## 71.1 What is implemented
+
+- Provider-neutral interfaces in `app/voice/providers/base.py`: `STTProvider`, `TTSProvider`, `RealtimeTransportProvider`, `TelephonyProvider`, plus deterministic mock implementations (`app/voice/providers/mock.py`) selected by default via `app/voice/providers/factory.py`.
+- A channel-neutral `VoiceSession` model (`app/models/voice.py`) and service (`app/services/voice.py`) covering session creation, the turn-taking/barge-in state machine (`app/voice/state_machine.py`), event handling, idempotent phone-call creation, session termination, and audit logging.
+- A REST event contract (`app/voice/router.py`) for both channels - see the Voice APIs section of `docs/api-contract.md`.
+- Full integration with the existing Task 006 `AgentOrchestrator`: a `final_transcript` event calls `handle_message()` on the session's own `Conversation` exactly as the text chat endpoint does. No second reasoning system exists. Tool execution, RAG, leads, appointments, applications, and escalation all run through the same orchestrator and the same tools as Tasks 006-010.
+- College-level voice configuration on `agent_configs` (`voice_phone_number`, `voice_settings` JSON: web/phone enabled flags, default/fallback language, voice_id, greeting override, session timeout, max duration, recording/transcript policy).
+- Structured logging with session/college/conversation correlation for session creation, agent latency, TTS latency, interruptions, and session end.
+
+## 71.2 What is provider-dependent / not implemented
+
+- No real WebRTC/LiveKit media transport carries actual audio frames. `RealtimeTransportProvider` issues a real, short-lived session credential; the media path itself is a real provider's job once one is configured.
+- No real STT/TTS vendor is integrated. `STTProvider.recognize()` takes raw audio bytes; the phone webhook path exercises this contract with the mock decoding UTF-8 text (deterministic for tests). A production deployment implements this interface against a real vendor SDK without changing `VoiceSessionService`.
+- No real telephony vendor (Twilio, Exotel, etc.) is wired up. `SharedSecretTelephonyProvider` demonstrates the generic HMAC-webhook-signature pattern most vendors use; a vendor-specific adapter replaces it behind the same `TelephonyProvider` interface.
+- Latency figures reported in API responses and logs (`agent_latency_ms`, `tts_latency_ms`) are genuinely measured wall-clock time for the mock providers' work, not a claim about a real provider's performance.
+
+## 71.3 Configuration
+
+See `docs/development.md` for the full environment variable list and local development instructions.
+

@@ -1686,5 +1686,32 @@ College-specific AI Admissions Agent
 
 A new college should be onboardable primarily through configuration and data ingestion rather than source-code changes.
 
+---
+
+## Voice Layer Architecture (Task 011 Addendum)
+
+The voice layer is an adapter around the AI Admissions Agent Core described above, not a second agent. Both entry points converge on the same conversation/agent path:
+
+```text
+Web browser microphone          Phone call
+        |                            |
+Realtime transport (mock/         Telephony provider webhook
+ WebRTC/LiveKit-compatible)             |
+        |                            |
+        +------------ VoiceSession --+
+                       |
+              Conversation (existing)
+                       |
+              AgentOrchestrator.handle_message()   <- Task 006, unchanged
+                       |
+        RAG + agent tools + leads + appointments + applications + escalation
+                       |
+              TTS (provider-neutral)
+                       |
+         Student / caller
+```
+
+`app/services/voice.py` owns only: session lifecycle, the turn-taking/barge-in state machine, provider selection, and converting the orchestrator's text response into speech. It never duplicates intent detection, tool logic, or business rules - those remain exactly the Task 006-010 implementations, reused unchanged. Provider interfaces live in `app/voice/providers/`; see docs/voice.md section 71 for what is implemented versus provider-dependent, and docs/api-contract.md's Voice APIs section for the request/response contract.
+
 
 

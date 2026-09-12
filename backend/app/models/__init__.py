@@ -19,6 +19,7 @@ from app.models.conversations import Conversation, Message  # noqa: F401
 from app.models.knowledge import KnowledgeSource, KnowledgeChunk, UnansweredQuestion  # noqa: F401
 from app.models.agent_config import AgentConfig  # noqa: F401
 from app.models.support import FAQ, SupportTicket, AuditLog  # noqa: F401
+from app.models.voice import VoiceSession  # noqa: F401
 
 __all__ = [
     "Base",
@@ -47,4 +48,5 @@ __all__ = [
     "FAQ",
     "SupportTicket",
     "AuditLog",
+    "VoiceSession",
 ]

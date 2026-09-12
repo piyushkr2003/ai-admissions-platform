@@ -2518,3 +2518,43 @@ Do not optimize for a quick demo at the expense of the production architecture.
 
 The first demo should be real enough that the same foundation can later be configured for actual colleges without rebuilding the product.
 
+---
+
+## Voice Development (Task 011 Addendum)
+
+### Environment variables
+
+All default to the deterministic mock provider - no credentials are required for local development or tests.
+
+```text
+STT_PROVIDER=mock                    # "mock" or a real vendor name once an adapter exists
+TTS_PROVIDER=mock
+VOICE_TRANSPORT_PROVIDER=mock
+TELEPHONY_PROVIDER=mock
+TELEPHONY_WEBHOOK_SECRET=            # required (non-empty) before any webhook is accepted
+STT_API_KEY=
+TTS_API_KEY=
+VOICE_PROVIDER_API_KEY=
+VOICE_SESSION_MAX_DURATION_SECONDS=1800
+VOICE_SESSION_IDLE_TIMEOUT_SECONDS=60
+VOICE_MAX_CONCURRENT_SESSIONS_PER_COLLEGE=20
+```
+
+Selecting a provider name other than `mock` without its adapter/credential raises `RESOURCE_UNAVAILABLE` at call time - it never silently falls back to the mock or pretends to work.
+
+### Local development
+
+1. `alembic upgrade head` (adds `voice_sessions` and the `agent_configs.voice_phone_number` / `voice_settings` columns).
+2. Run the backend as usual. `POST /api/v1/voice/sessions` with a seeded college id (see `app/db/seed.py` - Nova is seeded with both web and phone voice enabled and a fictional `voice_phone_number`) exercises the full session lifecycle immediately, no external service needed.
+3. Drive a conversation by posting `final_transcript` events to `/api/v1/voice/sessions/{id}/events` - this is the same request a real STT provider's streaming callback (or a browser-side STT widget) would produce.
+4. Simulate a phone call with `POST /api/v1/voice/telephony/mock/inbound`, signing the JSON body with HMAC-SHA256 using `TELEPHONY_WEBHOOK_SECRET` in the `X-Voice-Signature` header (see `tests/test_voice.py::_webhook` for a minimal example).
+5. Inspect the resulting `Conversation`/`Message` rows exactly as for text chat - voice transcripts are ordinary conversation history, not a separate store.
+
+### Testing
+
+`tests/test_voice.py` covers provider unit behavior, the turn-taking/barge-in state machine, web session lifecycle (creation, events, interruption, duplicate-event idempotency, disconnect, max-duration enforcement), phone webhook handling (signature verification, tenant resolution by number, duplicate call-start/call-end idempotency), full agent integration (appointment booking, tool-failure honesty, escalation), and RBAC/tenant isolation for the staff endpoints. No paid provider account is required to run it.
+
+### Production provider integration
+
+Implement the relevant interface in `app/voice/providers/` (`STTProvider`, `TTSProvider`, `RealtimeTransportProvider`, or `TelephonyProvider`), register it in `app/voice/providers/factory.py` behind its provider name, and set the corresponding `*_PROVIDER` and credential environment variables. `app/services/voice.py` and the voice API do not change.
+

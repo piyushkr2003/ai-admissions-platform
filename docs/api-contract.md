@@ -4573,4 +4573,132 @@ Then in PowerShell run:
 ```powershell
 
 Get-Item docs\\api-contract.md
+```
+
+---
+
+## Voice APIs (Task 011 Addendum)
+
+Provider-neutral voice session contract, backed by `app/voice/router.py` and `app/services/voice.py`. All voice sessions ultimately drive the same `AgentOrchestrator` as the text conversation APIs above - see docs/voice.md section 71 for implementation status and which pieces are provider-dependent.
+
+### Trust model
+
+- **Public capability-token endpoints** (session lifecycle): identical trust model to `POST /conversations` - unauthenticated, since a prospective caller has no account. `college_id` in the create-session request only selects which college's public agent to talk to; every subsequent call is scoped to the session's own resolved `college_id`, never a client-supplied one.
+- **Staff endpoints** (list/force-end): require `voice_sessions:read` / `voice_sessions:write` and resolve the tenant from trusted auth context via the same `resolve_tenant_college_id` pattern used everywhere else in this API.
+- **Telephony webhook**: authenticates the caller (the telephony provider) via HMAC signature verification instead of a bearer token.
+
+### `POST /api/v1/voice/sessions`
+
+Create a web voice session.
+
+Request:
+
+```json
+{
+  "college_id": "college_123",
+  "channel": "web_voice",
+  "language": "en"
+}
+```
+
+Response:
+
+```json
+{
+  "data": {
+    "session_id": "voice_123",
+    "conversation_id": "conv_123",
+    "status": "connecting",
+    "language": "en",
+    "connection_token": "...",
+    "connection_expires_at": "2026-09-20T15:05:00+00:00",
+    "ice_servers": [],
+    "greeting": {
+      "text": "Hello! Welcome to Nova Institute of Technology admissions...",
+      "audio_url": "mock://tts/...",
+      "audio_duration_ms": 3200
+    }
+  }
+}
+```
+
+`connection_token` is short-lived and scoped to this session; it is what a real WebRTC/LiveKit client presents to open the realtime media connection. Only `channel: "web_voice"` may be created through this endpoint - phone sessions are created by the telephony webhook.
+
+### `GET /api/v1/voice/sessions/{session_id}`
+
+Return session status (public, same capability-token model as `GET /conversations/{id}`).
+
+### `POST /api/v1/voice/sessions/{session_id}/events`
+
+The core event contract. Request:
+
+```json
+{
+  "event_type": "final_transcript",
+  "text": "What is the CSE fee?",
+  "event_id": "evt-123"
+}
+```
+
+`event_type` is one of: `speech_started`, `partial_transcript`, `final_transcript`, `speech_stopped`, `interruption`, `client_disconnect`, `client_reconnect`.
+
+- Only `final_transcript` invokes the AI agent - partial transcripts never trigger tools or irreversible actions (docs/voice.md section 14).
+- `speech_started`/`interruption` while the agent is speaking is barge-in: any in-flight TTS is cancelled and the turn state returns to `listening`.
+- `event_id`, when supplied, makes the event idempotent - an exact retry (matching `event_id`) replays the cached result instead of reprocessing.
+
+Response for a `final_transcript` event:
+
+```json
+{
+  "data": {
+    "response_text": "The current tuition fee is...",
+    "audio_url": "mock://tts/...",
+    "audio_duration_ms": 1800,
+    "tools_used": ["get_fee_structure"],
+    "intents": ["fees"],
+    "escalation_required": false,
+    "agent_latency_ms": 12,
+    "tts_latency_ms": 1,
+    "turn_state": "speaking"
+  }
+}
+```
+
+### `POST /api/v1/voice/sessions/{session_id}/end`
+
+End a session gracefully. Idempotent - ending an already-ended session returns its final state without error.
+
+### `GET /api/v1/voice/sessions` (staff)
+
+List voice sessions for the resolved tenant. Supports `channel`, `status`, `page`, `page_size` filters and standard pagination.
+
+### `GET /api/v1/voice/sessions/{session_id}/admin` (staff)
+
+Tenant-scoped session detail lookup (returns `NOT_FOUND` if the session belongs to another college). Requires `voice_sessions:read`.
+
+### `POST /api/v1/voice/sessions/{session_id}/force-end` (staff)
+
+Administratively terminate a stuck/abusive session. Requires `voice_sessions:write`.
+
+### `POST /api/v1/voice/telephony/{provider_name}/inbound`
+
+Telephony provider webhook. `provider_name` must match the configured `TELEPHONY_PROVIDER`. The raw request body must carry a valid HMAC-SHA256 signature (hex) in the `X-Voice-Signature` header, computed over the raw body with `TELEPHONY_WEBHOOK_SECRET`; an unconfigured secret always rejects the request rather than accepting it unauthenticated.
+
+Payload shape (normalized by the `TelephonyProvider` adapter - a real vendor's own webhook schema is translated to this by its adapter, not by the route):
+
+```json
+{
+  "call_id": "call_123",
+  "from_number": "+91XXXXXXXXXX",
+  "to_number": "+91YYYYYYYYYY",
+  "event_type": "call_started",
+  "language": "en"
+}
+```
+
+`event_type` is one of `call_started`, `speech` (carries `text` or `audio_base64`), `call_ended`. The college is resolved from `to_number` against `agent_configs.voice_phone_number` - never trusted from any other field. A duplicate `call_started` for the same `(provider, call_id)` returns the existing session (`created: false`) rather than creating a second one; a duplicate `call_ended` is a safe no-op.
+
+### Common voice error codes
+
+Uses the existing standard error envelope (section 9). Notable cases: `NOT_FOUND` (unknown college/phone number/session), `VALIDATION_ERROR` (unknown event type, malformed webhook payload), `CONFLICT` (event posted to an already-ended session), `UNAUTHORIZED` (webhook signature failure), `RESOURCE_UNAVAILABLE` (channel disabled for this college, or a configured provider has no working adapter/credentials), `RATE_LIMITED` (concurrent session limit reached for this college).
 
