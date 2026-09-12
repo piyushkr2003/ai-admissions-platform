@@ -2577,5 +2577,25 @@ Backed by `app/analytics/` (`dates.py`, `service.py`, `router.py`); see docs/api
 - `ai_resolution_rate` is intentionally never computed - see docs/api-contract.md section 64 for why.
 - Lead → appointment/application "conversion" is a student-level signal (via the shared `student_id` foreign key), not a per-lead-instance one, because no `lead_id` column exists on `appointments`/`applications`.
 - `query_categories` reflects each conversation's *most recent* detected intent, not a full per-turn intent history.
-- The frontend's existing `/dashboard/analytics` page (Task 012) still composes its view from list-endpoint counts rather than calling the new `/api/v1/analytics/overview` - that page predates this task and was intentionally left alone (docs/api-contract.md section 64); switching it over is a good first Task 014 candidate.
+- (Resolved in Task 014.) The `/dashboard/analytics` page has been migrated off list-endpoint composition onto the real analytics API - see the Task 014 addendum below.
+
+## Analytics Dashboard Integration (Task 014 Addendum)
+
+`frontend/features/analytics/analytics-page-client.tsx` is now the sole consumer of `GET /api/v1/analytics/overview` and `GET /api/v1/analytics/trends` (`frontend/lib/api/analytics.ts`) for the `/dashboard/analytics` page. It no longer calls the leads/appointments/applications/support-tickets/voice list endpoints to compute totals - one overview request and one trends request per date-range/tenant change, matching `docs/api-contract.md` section 64 exactly.
+
+### Date range
+
+`frontend/lib/analytics/date-range.ts` defines the five presets (`today`, `last_7_days`, `last_30_days`, `last_90_days`, `custom`) and a `validateCustomRange` function that mirrors only what the backend itself rejects (missing dates, end before start, over 366 days) - it deliberately does not reject a future range, since the backend treats that as valid and simply returns zero-count data. Custom-range dates are sent to the backend as plain `YYYY-MM-DD` strings with no client-side timezone conversion; the college's timezone interpretation happens entirely server-side.
+
+### Charts
+
+`frontend/features/analytics/trend-chart.tsx` is a small dependency-free inline-SVG line chart (no charting library was added: the data is always a single daily-count series of at most ~366 points, so a hand-rolled chart avoids a new bundle dependency and CSP change while giving full control over accessibility). Each chart also renders a visually-hidden data table with the exact date/count pairs for screen-reader and keyboard users.
+
+### Metric provenance
+
+`frontend/features/analytics/metric-note.tsx` surfaces the backend's own `measurement`/`definition`/`reason` fields (Task 013) next to every derived or uncertain metric - an "unavailable" metric (e.g. AI resolution rate) is always rendered as an explicit statement of unavailability, never a fabricated percentage.
+
+### Testing
+
+`tests/analytics-api.test.ts` (API client: query params per range, response shape pass-through, 401/403 propagation, no legacy endpoint calls), `tests/analytics-date-range.test.ts` (pure validation/formatting logic), and `tests/analytics-page.test.tsx` (component: all five date-range presets, custom-range validation, loading/empty/error states, partial failure between overview and trends, 403 access-denied state, platform_admin tenant switching, college-scoped role locking, sparse/zero trend rendering).
 

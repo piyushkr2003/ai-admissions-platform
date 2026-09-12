@@ -2928,7 +2928,7 @@ Every table analytics filters on has a dedicated `(college_id, created_at)` comp
 
 ### Known limitations / not yet implemented
 
-- The Task 012 `/dashboard/analytics` frontend page still composes its view from list-endpoint counts (`frontend/lib/api/analytics.ts`) rather than calling this endpoint - see docs/development.md's Task 013 addendum for why that migration was left for a later task.
+- (Resolved in Task 014.) `frontend/features/analytics/analytics-page-client.tsx` now consumes `GET /api/v1/analytics/overview` and `GET /api/v1/analytics/trends` directly via `frontend/lib/api/analytics.ts` - it no longer composes totals from the leads/appointments/applications/support-tickets/voice list endpoints. See docs/development.md's Task 014 addendum for the date-range UI, chart, and metric-provenance handling.
 - No response caching - correctness over premature optimization at this data scale; add a short, tenant- and range-aware cache only if load testing shows it is needed.
 
 65\. Dashboard API
