@@ -62,4 +62,28 @@ describe("ApiClient", () => {
       code: "NETWORK_ERROR",
     });
   });
+
+  it("binds the default fetch implementation to the global object", () => {
+    // Regression test: without .bind(globalThis), `this.fetchImpl = fetch`
+    // stores the unbound native function. Calling it later as
+    // `this.fetchImpl(...)` (a method call, receiver = the ApiClient
+    // instance) makes a real browser throw a synchronous
+    // "TypeError: Failed to execute 'fetch' on 'Window': Illegal
+    // invocation" - native fetch is a WebIDL "branded" method that only
+    // accepts `window` (or `undefined`) as `this`. This exact failure mode
+    // is browser-specific (Node's fetch used under Vitest/jsdom does not
+    // enforce the same brand check, so it can't be reproduced by literally
+    // invoking fetch here) - instead we assert the fix itself: a real
+    // fetch.bind(...) result always has a name prefixed "bound ", which
+    // the pre-fix code (`?? fetch`) could never produce.
+    const client = new ApiClient({ baseUrl: "http://api.test/api/v1" });
+    const fetchImpl = (client as unknown as { fetchImpl: typeof fetch }).fetchImpl;
+    expect(fetchImpl.name).toMatch(/^bound /);
+
+    // An injected test fetchImpl (a plain mock, no WebIDL brand) must remain
+    // usable exactly as provided - the dependency-injection seam is unaffected.
+    const injected = vi.fn();
+    const injectedClient = new ApiClient({ baseUrl: "http://api.test/api/v1", fetchImpl: injected });
+    expect((injectedClient as unknown as { fetchImpl: typeof fetch }).fetchImpl).toBe(injected);
+  });
 });

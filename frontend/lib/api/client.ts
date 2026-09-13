@@ -46,7 +46,12 @@ export class ApiClient {
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? getApiBaseUrl()).replace(/\/+$/, "");
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    // Bind to globalThis: calling this.fetchImpl(...) later is a method-call
+    // (receiver = the ApiClient instance), and native fetch is a WebIDL
+    // "branded" method that throws "Illegal invocation" unless its `this`
+    // is the real global. An injected test fetchImpl (a plain mock) has no
+    // such brand check, so this only affects the real default.
+    this.fetchImpl = options.fetchImpl ?? fetch.bind(globalThis);
     this.getAccessToken = options.getAccessToken;
     this.onUnauthorized = options.onUnauthorized;
   }
