@@ -18,10 +18,30 @@ via ffmpeg/PyAV, not just raw PCM.
 TTS shells out to the Piper CLI (https://github.com/rhasspy/piper) for
 English - chosen over Kokoro for the same Windows-friendliness reason:
 Piper ships a single prebuilt executable per platform (no Python
-C-extension build, no `espeak-ng` phonemizer packaging friction), and
-its `--output_file -` mode streams a WAV file straight to stdout, which
-this adapter captures directly as `TTSResult.audio_bytes` - no temp
-files needed.
+C-extension build, no `espeak-ng` phonemizer packaging friction). It
+writes to a real temporary WAV file rather than streaming to stdout
+(`--output_file -`) and pins the subprocess's working directory to
+Piper's own folder (so it reliably finds `espeak-ng-data`/onnxruntime
+resources beside it) - defensive hardening for the general class of
+"a console app behaves differently when spawned with piped/non-default
+stdio," matching the invocation shape already proven to work by hand.
+
+The actual root cause of a real-world crash investigated here
+(Windows `STATUS_STACK_BUFFER_OVERRUN` / 0xC0000409, returncode
+3221226505) was more specific: `voice_id` is a cross-provider concept -
+for Gemini it is a *named voice string* (e.g. "Kore"), never a
+filesystem path, and a college's seeded `AgentConfig.voice_settings`
+sets it that way by default (e.g. "nova-assist-default" - see
+app/db/seed.py). Piper's only notion of a voice is a real `.onnx` model
+file, so blindly forwarding any non-empty `voice_id` to it as `--model`
+(the original code did exactly that) makes Piper try to load a
+nonexistent "model" and abort hard instead of failing cleanly - which is
+why the crash appeared only through the full app (which always resolves
+some `voice_id`) and never in a manual, direct Piper invocation (which
+naturally never passes one). `LocalPiperTTSProvider.synthesize` now only
+honors `voice_id` as a model-path override when it actually names a real
+file on disk; otherwise it uses the configured `PIPER_MODEL_PATH`
+exactly as if no `voice_id` had been supplied.
 
 Hindi and Kannada TTS use Meta's MMS-TTS (Massively Multilingual
 Speech) VITS models run in-process via Hugging Face `transformers`
@@ -149,26 +169,55 @@ class LocalPiperTTSProvider(TTSProvider):
         if not text or not text.strip():
             raise ResourceUnavailableError("Local TTS requires non-empty text to synthesize.")
 
-        model_path = voice_id or self._model_path
-        try:
-            result = subprocess.run(
-                [self._command, "--model", model_path, "--output_file", "-"],
-                input=text.encode("utf-8"),
-                capture_output=True,
-                timeout=self._timeout_seconds,
-                check=False,
-            )
-        except FileNotFoundError as exc:
-            raise ResourceUnavailableError(f"Piper executable '{self._command}' could not be run.") from exc
-        except subprocess.TimeoutExpired as exc:
-            logger.warning("voice.local_piper_timeout")
-            raise ResourceUnavailableError("Local Piper TTS timed out.") from exc
+        # `voice_id` is a cross-provider concept - for Gemini it's a named
+        # voice string (e.g. "Kore") that is never a filesystem path, and
+        # college configs seed it that way by default (see
+        # app/db/seed.py's AgentConfig.voice_settings, e.g.
+        # "nova-assist-default"). Piper's *only* notion of a voice is a
+        # real .onnx model file, so a non-Piper voice_id must never be
+        # forwarded to it as `--model` - Piper does not fail cleanly on a
+        # nonexistent model path, it aborts hard (observed: Windows
+        # STATUS_STACK_BUFFER_OVERRUN / 0xC0000409). Only honor voice_id
+        # here when it actually names a real file on disk; otherwise fall
+        # back to the configured PIPER_MODEL_PATH, exactly as if no
+        # voice_id had been supplied at all.
+        model_path = voice_id if voice_id and Path(voice_id).is_file() else self._model_path
 
-        if result.returncode != 0 or not result.stdout:
-            logger.warning("voice.local_piper_failed returncode=%s", result.returncode)
+        # Piper writes to a real, seekable file rather than streaming to
+        # stdout (`--output_file -`): its WAV writer seeks back after
+        # synthesis to patch the RIFF header's size fields, which a real
+        # file reliably supports - exactly the invocation shape already
+        # proven to work by hand. The subprocess's working directory is
+        # also pinned to Piper's own folder so it reliably finds
+        # espeak-ng-data/onnxruntime resources alongside it.
+        resolved_command = shutil.which(self._command) or self._command
+        piper_dir = Path(resolved_command).resolve().parent
+
+        with tempfile.TemporaryDirectory(prefix="piper-tts-") as tmp_dir:
+            output_path = Path(tmp_dir) / "output.wav"
+            try:
+                result = subprocess.run(
+                    [self._command, "--model", model_path, "--output_file", str(output_path)],
+                    input=text.encode("utf-8"),
+                    capture_output=True,
+                    timeout=self._timeout_seconds,
+                    check=False,
+                    cwd=str(piper_dir) if piper_dir.is_dir() else None,
+                )
+            except FileNotFoundError as exc:
+                raise ResourceUnavailableError(f"Piper executable '{self._command}' could not be run.") from exc
+            except subprocess.TimeoutExpired as exc:
+                logger.warning("voice.local_piper_timeout")
+                raise ResourceUnavailableError("Local Piper TTS timed out.") from exc
+
+            wav_bytes = output_path.read_bytes() if output_path.exists() else b""
+
+        if result.returncode != 0 or not wav_bytes:
+            logger.warning(
+                "voice.local_piper_failed returncode=%s model_path=%s", result.returncode, model_path,
+            )
             raise ResourceUnavailableError("Local Piper TTS failed to synthesize audio.")
 
-        wav_bytes = result.stdout
         duration_ms = _wav_duration_ms(wav_bytes)
         return TTSResult(audio_url=None, audio_bytes=wav_bytes, duration_ms=duration_ms, provider_ref=None)
 

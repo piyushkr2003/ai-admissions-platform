@@ -172,6 +172,52 @@ def test_create_web_session_returns_token_and_greeting(client, db):
     assert messages[0].sender_type == "ai"
 
 
+def test_create_web_session_local_piper_ignores_seeded_bogus_voice_id(client, db, monkeypatch):
+    """End-to-end regression test for the reported Windows crash: Nova's
+    real seeded AgentConfig.voice_settings sets voice_id="nova-assist-default"
+    (a Gemini-style named-voice placeholder, not a Piper model file - see
+    app/db/seed.py). Before the fix, VoiceSessionService._speak_greeting
+    forwarded that straight to LocalPiperTTSProvider as `--model`, which
+    made real Piper builds abort hard (STATUS_STACK_BUFFER_OVERRUN /
+    0xC0000409) instead of just failing to find the file. This proves the
+    full create_web_session path now succeeds with TTS_PROVIDER=local
+    against this exact real seeded configuration."""
+    import subprocess as subprocess_module
+    import sys as sys_module
+
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "tts_provider", "local")
+    monkeypatch.setattr(settings, "piper_command", sys_module.executable)
+    monkeypatch.setattr(settings, "piper_model_path", "en_US-lessac-medium.onnx")
+
+    captured = {}
+
+    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
+        captured["model_arg"] = cmd[cmd.index("--model") + 1]
+        from pathlib import Path
+
+        output_index = cmd.index("--output_file") + 1
+        Path(cmd[output_index]).write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+        return subprocess_module.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess_module, "run", fake_run)
+
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+
+    from app.models.agent_config import AgentConfig
+
+    config = db.execute(select(AgentConfig).where(AgentConfig.college_id == nova.id)).scalar_one()
+    assert config.voice_settings["voice_id"] == "nova-assist-default"  # the real, currently-seeded bogus value
+
+    data = _create_web_session(client, str(nova.id))
+    assert data["status"] == "connecting"
+    assert captured["model_arg"] == "en_US-lessac-medium.onnx"  # bogus voice_id ignored, real config used
+
+
 def test_create_web_session_unknown_college_404(client, db):
     seed_demo_data(db)
     db.commit()
