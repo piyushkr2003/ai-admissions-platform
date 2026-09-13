@@ -61,7 +61,11 @@ class Settings(BaseSettings):
     # provider-name setting is introduced - that would create two competing
     # provider-selection mechanisms). Reuses GOOGLE_API_KEY and
     # GEMINI_API_BASE_URL already defined above for the Gemini LLM provider.
-    gemini_stt_model: str = "gemini-2.5-flash"
+    # gemini-2.5-flash was deprecated by Google for new API key usage
+    # ("no longer available to new users") - gemini-3.6-flash is the
+    # currently supported replacement, confirmed against the real Gemini
+    # API (see scripts/smoke_test_gemini_voice.py).
+    gemini_stt_model: str = "gemini-3.6-flash"
     gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
     gemini_tts_voice: str = "Kore"
     gemini_voice_timeout_seconds: float = 8.0

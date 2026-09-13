@@ -126,13 +126,13 @@ def test_stt_recognize_sends_expected_request_and_parses_response(monkeypatch):
         return _stt_response("What is the fee for B.Tech CSE?")
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    provider = GeminiSTTProvider(api_key=FAKE_KEY, model="gemini-2.5-flash", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5, sample_rate=16000, num_channels=1)
+    provider = GeminiSTTProvider(api_key=FAKE_KEY, model="gemini-3.6-flash", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5, sample_rate=16000, num_channels=1)
 
     result = provider.recognize(_sample_pcm16(), language="hinglish")
 
     assert result.text == "What is the fee for B.Tech CSE?"
     assert result.language == "hinglish"
-    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent"
     assert captured["headers"]["x-goog-api-key"] == FAKE_KEY
     assert FAKE_KEY not in captured["url"]
     assert captured["timeout"] == 5

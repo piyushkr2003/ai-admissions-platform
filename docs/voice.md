@@ -2737,7 +2737,7 @@ STT_PROVIDER=mock                       # "mock" (default) or "gemini"
 TTS_PROVIDER=mock                       # "mock" (default) or "gemini"
 GOOGLE_API_KEY=                         # required if either provider above is "gemini" (shared with AGENT_LLM_PROVIDER=gemini)
 GEMINI_API_BASE_URL=https://generativelanguage.googleapis.com   # shared with the Gemini LLM provider
-GEMINI_STT_MODEL=gemini-2.5-flash
+GEMINI_STT_MODEL=gemini-3.6-flash        # gemini-2.5-flash was deprecated by Google; confirmed against the real API
 GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
 GEMINI_TTS_VOICE=Kore
 GEMINI_VOICE_TIMEOUT_SECONDS=8.0
