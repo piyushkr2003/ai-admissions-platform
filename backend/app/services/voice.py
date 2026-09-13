@@ -74,6 +74,21 @@ def _resolve_language(requested: str | None, settings: dict, college: CollegeCon
     return default
 
 
+def _initial_conversation_state(requested: str | None, resolved_language: str) -> dict:
+    """The conversation's starting AgentState (docs/voice.md "Language
+    Selection"). When the caller explicitly requested a language (the
+    voice console's language picker, or a future phone IVR selection),
+    it is locked in as authoritative for the whole conversation -
+    AgentOrchestrator.handle_message will never let per-turn
+    detect_language() heuristics override it (this is required for "kn",
+    which detect_language cannot recognize at all). When no language was
+    requested (legacy/auto callers), state starts empty exactly as
+    before, and per-turn auto-detection behaves unchanged."""
+    if requested is None:
+        return {}
+    return {"language": resolved_language, "language_locked": True}
+
+
 def _playable_audio_url(tts_result) -> str | None:
     """Returns a URL the browser's `<audio>` element can actually play.
 
@@ -158,7 +173,8 @@ class VoiceSessionService:
         now = datetime.now(timezone.utc)
         conversation = Conversation(
             college_id=college.college_id, channel="web_voice", session_id=uuid.uuid4().hex,
-            status="active", started_at=now, language=lang, state={},
+            status="active", started_at=now, language=lang,
+            state=_initial_conversation_state(language, lang),
         )
         self.db.add(conversation)
         self.db.flush()
@@ -220,7 +236,8 @@ class VoiceSessionService:
         now = datetime.now(timezone.utc)
         conversation = Conversation(
             college_id=college.college_id, channel="phone_voice", session_id=call_id,
-            status="active", started_at=now, language=lang, state={},
+            status="active", started_at=now, language=lang,
+            state=_initial_conversation_state(language, lang),
         )
         self.db.add(conversation)
         self.db.flush()

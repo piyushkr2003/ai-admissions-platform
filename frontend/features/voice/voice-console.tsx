@@ -13,7 +13,10 @@ import {
   describeMicrophoneError,
   describeTerminationReason,
   isPlayableAudioUrl,
+  labelForLanguage,
   labelForMode,
+  LANGUAGE_OPTIONS,
+  type LanguageCode,
 } from "@/features/voice/voice-console-helpers";
 import { useAuth } from "@/features/auth/auth-provider";
 import { useTenant } from "@/features/tenant/tenant-provider";
@@ -56,6 +59,7 @@ export function VoiceConsole() {
   const canUse = user ? hasFrontendPermission(user.role, "voice_sessions:write") : false;
 
   const [status, setStatus] = useState<ConsoleStatus>("idle");
+  const [selectedLanguage, setSelectedLanguage] = useState<LanguageCode | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [session, setSession] = useState<VoiceSessionCreateResponse | null>(null);
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
@@ -141,7 +145,7 @@ export function VoiceConsole() {
   }, [apiClient, mode, session, status]);
 
   async function handleStart() {
-    if (!collegeId) {
+    if (!collegeId || !selectedLanguage) {
       return;
     }
     setErrorMessage(null);
@@ -161,7 +165,7 @@ export function VoiceConsole() {
     setStatus("creating_session");
     let created: VoiceSessionCreateResponse;
     try {
-      const response = await voiceApi.createSession(apiClient, collegeId);
+      const response = await voiceApi.createSession(apiClient, collegeId, selectedLanguage);
       created = response.data;
     } catch (createError) {
       stopLocalMic();
@@ -419,8 +423,27 @@ export function VoiceConsole() {
 
         {status === "idle" || status === "mic_denied" || status === "error" || status === "ended" ? (
           <div className="voice-console__start">
+            <div className="voice-console__language-picker">
+              <p className="voice-console__language-prompt">Choose your language to begin</p>
+              <div className="voice-console__language-options" role="radiogroup" aria-label="Conversation language">
+                {LANGUAGE_OPTIONS.map((option) => (
+                  <button
+                    aria-checked={selectedLanguage === option.code}
+                    className={`voice-console__language-option${
+                      selectedLanguage === option.code ? " voice-console__language-option--selected" : ""
+                    }`}
+                    key={option.code}
+                    onClick={() => setSelectedLanguage(option.code)}
+                    role="radio"
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <Button
-              disabled={tenantLoading || !collegeId}
+              disabled={tenantLoading || !collegeId || !selectedLanguage}
               icon={<Mic size={16} aria-hidden="true" />}
               onClick={() => void handleStart()}
             >
@@ -448,6 +471,7 @@ export function VoiceConsole() {
             <div className="voice-console__status" role="status">
               <RadioTower aria-hidden="true" size={16} />
               <span>{isAgentSpeaking ? "Agent speaking…" : "Listening"}</span>
+              <span className="voice-console__language-active">{labelForLanguage(session?.language)}</span>
             </div>
 
             <ol aria-label="Conversation transcript" className="voice-console__transcript">

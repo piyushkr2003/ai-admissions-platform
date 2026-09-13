@@ -39,6 +39,14 @@ class AgentState:
 
     pending_question: str | None = None
     language: str = "en"
+    # True when the language was explicitly selected by the user up front
+    # (voice console language picker, or an explicit `language` on
+    # POST /conversations) rather than left to auto-detect. A locked
+    # language is authoritative for the whole conversation - per-turn
+    # detect_language() heuristics must never silently override it (this
+    # is what makes "kn" usable at all: detect_language has no Kannada
+    # heuristic and would otherwise fall back to "en"/"hinglish").
+    language_locked: bool = False
     summary: str = ""
     turn_count: int = 0
 

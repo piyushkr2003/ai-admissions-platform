@@ -89,6 +89,15 @@ class Settings(BaseSettings):
     piper_model_path: str = ""  # path to a downloaded .onnx voice model
     piper_timeout_seconds: float = 30.0
 
+    # Hindi/Kannada local TTS (Local Voice: English/Hindi/Kannada addendum).
+    # Piper has no official Kannada voice and only a limited Hindi one, so
+    # these two languages use Meta's MMS-TTS models via `transformers`
+    # instead - see app/voice/providers/local.py::LocalMultilingualTTSProvider.
+    # English keeps using Piper (piper_command/piper_model_path above)
+    # completely unchanged.
+    mms_hindi_model_id: str = "facebook/mms-tts-hin"
+    mms_kannada_model_id: str = "facebook/mms-tts-kan"
+
     # Future providers
     stt_api_key: str = ""
     tts_api_key: str = ""

@@ -2891,5 +2891,67 @@ Set `STT_PROVIDER`/`TTS_PROVIDER`/`AGENT_LLM_PROVIDER` back to `gemini` (and `GO
 
 ### Testing
 
-`tests/test_voice_local_providers.py` covers, with no real Whisper model download, Ollama server, or Piper binary invoked anywhere: `faster-whisper`'s genuine `ImportError` fail-closed path (the package is not installed in the CI/dev environment this was verified in), empty-audio safety, Piper subprocess request construction/response parsing/timeout/non-zero-exit handling (`subprocess.run` monkeypatched), Piper executable-missing fail-closed behavior at construction time, Ollama request construction/response parsing/connection-refused/missing-model/malformed-response handling (`urllib.request.urlopen` monkeypatched), provider-factory selection for STT/TTS/LLM=`local` with no API key configured, TTS factory fail-closed when `PIPER_MODEL_PATH` is unset, and that `Settings.validate_for_production()` rejects all three `local` selections. `tests/test_voice.py` additionally covers the new `audio_base64` web-event input path (server-side STT via the existing mock provider) and the new `_playable_audio_url` data-URI helper (mock's non-playable reference is left untouched; a real provider's bytes become a playable `data:` URI). All pre-existing voice/orchestrator/RAG/tenant-isolation/tool test suites pass unmodified.
+`tests/test_voice_local_providers.py` covers, with no real Whisper model download, Ollama server, or Piper binary invoked anywhere: `faster-whisper`'s `ImportError` fail-closed path, empty-audio safety, Piper subprocess request construction/response parsing/timeout/non-zero-exit handling (`subprocess.run` monkeypatched), Piper executable-missing fail-closed behavior at construction time, Ollama request construction/response parsing/connection-refused/missing-model/malformed-response handling (`urllib.request.urlopen` monkeypatched), provider-factory selection for STT/TTS/LLM=`local` with no API key configured, TTS factory fail-closed when `PIPER_MODEL_PATH` is unset, and that `Settings.validate_for_production()` rejects all three `local` selections. (Originally this environment genuinely lacked `faster-whisper`, so its `ImportError` path was exercised for real; once the local voice stack - including `faster-whisper` itself - was actually installed on the development machine per the addendum below, the test was updated to simulate the same failure deterministically via `monkeypatch.setitem(sys.modules, "faster_whisper", None)` rather than depending on real absence - see that test's docstring.) `tests/test_voice.py` additionally covers the new `audio_base64` web-event input path (server-side STT via the existing mock provider) and the new `_playable_audio_url` data-URI helper (mock's non-playable reference is left untouched; a real provider's bytes become a playable `data:` URI). All pre-existing voice/orchestrator/RAG/tenant-isolation/tool test suites pass unmodified.
+
+## Local Voice: English/Hindi/Kannada (Local Voice Language Selection Addendum)
+
+Builds on the Local Free Demo Mode (Task 023) addendum above once the developer has real local Ollama/faster-whisper/Piper installations running (not just the mock-backed defaults). Two product decisions drive this addendum, both enforced in code, not just docs:
+
+1. **No automatic language detection for the initial conversation.** The student picks English/Hindi/Kannada from the voice console's language picker *before* any microphone/voice interaction starts; that choice is authoritative for the whole conversation.
+2. **Piper stays exactly as it was for English.** Hindi and Kannada are added as a second, local, offline TTS path (Piper has no official Kannada voice and only a limited Hindi one).
+
+### What changed
+
+- **Frontend** (`frontend/features/voice/voice-console.tsx`, `voice-console-helpers.ts`): a language picker (English / हिंदी / ಕನ್ನಡ) is now the first step on the voice console's idle screen - "Start voice session" stays disabled until one is chosen. The selected code (`en`/`hi`/`kn`) is passed straight through the existing `voiceApi.createSession(client, collegeId, language)` call, which already accepted a `language` argument - no new endpoint, no second voice architecture.
+- **Language is locked, not detected, once explicitly selected** (`app/agent/state.py`'s new `AgentState.language_locked`, set by `app/services/voice.py::_initial_conversation_state` and `app/conversations/router.py::create_conversation` whenever a caller passes an explicit `language`). `AgentOrchestrator.handle_message` only calls `detect_language()` when a conversation is *not* locked - existing auto-detecting callers (no language selection) are completely unaffected. This is what makes "kn" usable at all: `app/agent/language.py::detect_language` has no Kannada heuristic and would otherwise silently fall back to English.
+- **`"kn"` is now a first-class supported language**: added to `app/colleges/validators.py::SUPPORTED_LANGUAGE_CODES` and to Nova's `College.supported_languages`/`AgentConfig.supported_languages` (`app/db/seed.py`, `app/db/nova_demo.py`). Hinglish is untouched and still fully supported - it was never part of the three-way UI selector, but remains available for detected/free-text conversations and as a natural response style within a Hindi-selected one (see below).
+- **Prompts** (`app/agent/prompts.py`): `_pick()` gained a `kn` parameter alongside the existing `en`/`hi`/`hinglish`, with real Kannada text added to the same proof-of-concept set of templates (greeting, eligibility, fees, scholarships, documents, appointment confirmation, application draft, escalation, no-verified-info) that already had Hindi/Hinglish variants - anything without a Kannada variant still falls back to English, exactly like the existing Hindi/Hinglish behavior.
+- **The bounded open-ended LLM call** (`AgentOrchestrator._open_ended_reply` → Ollama in local mode) now receives the conversation's resolved language explicitly via `prompts.open_ended_system_prompt(college_name, agent_name, language)`, which appends a direct instruction ("Respond in Kannada", "Respond in natural Hindi... you may naturally respond in Hinglish where that reads more naturally", etc.) - the local LLM is told the language, never asked to infer it, so it spends zero tokens/latency on language identification.
+- **STT** (`app/voice/providers/local.py::_to_whisper_language`): `"kn"` maps to Whisper's `"kn"` language code and is now passed explicitly to `faster-whisper` (`model.transcribe(..., language=...)`) instead of relying on Whisper's own auto-detection, for the same latency/predictability reason as the UI decision.
+- **TTS** (`app/voice/providers/local.py::LocalMultilingualTTSProvider`, wired in `app/voice/providers/factory.py`): the `TTS_PROVIDER=local` selection now builds this wrapper instead of a bare `LocalPiperTTSProvider`. It implements the exact same `TTSProvider.synthesize(text, *, language="en", voice_id=None)` interface; `"en"`/`"hinglish"`/anything else routes to an internally-held, completely unchanged `LocalPiperTTSProvider`; `"hi"`/`"kn"` route to a local Meta MMS-TTS VITS model (`facebook/mms-tts-hin` / `facebook/mms-tts-kan`) run in-process via Hugging Face `transformers` (`app/core/config.py`'s new `mms_hindi_model_id`/`mms_kannada_model_id` settings). Loaded MMS models are cached at module scope (`_MMS_MODEL_CACHE`) so they stay warm across requests regardless of how many provider objects `get_tts_provider()` constructs.
+- **Production guard**: unchanged and still effective with zero new code - `Settings.validate_for_production()` already rejects `TTS_PROVIDER=local` (and `STT_PROVIDER=local`/`AGENT_LLM_PROVIDER=local`) outright by provider *name*, and the new multilingual TTS provider is still selected by that exact same name.
+
+### Installing the Hindi/Kannada TTS dependencies
+
+```bash
+cd backend
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install transformers
+```
+
+No separate model download step is required - `transformers` downloads and caches `facebook/mms-tts-hin`/`facebook/mms-tts-kan` automatically on first use, the same lazy-download pattern already used for `faster-whisper`'s Whisper model.
+
+### Configuring `backend/.env`
+
+```text
+# Already set from the Task 023 addendum above:
+STT_PROVIDER=local
+TTS_PROVIDER=local
+AGENT_LLM_PROVIDER=local
+PIPER_COMMAND=piper
+PIPER_MODEL_PATH=C:\path\to\en_US-lessac-medium.onnx
+
+# New - Hindi/Kannada only; English keeps using Piper above unchanged.
+MMS_HINDI_MODEL_ID=facebook/mms-tts-hin
+MMS_KANNADA_MODEL_ID=facebook/mms-tts-kan
+```
+
+### Known limitations
+
+- Kannada is selection-only: there is no `detect_language()` heuristic for Kannada script, by design - it is only ever set via an explicit, locked language selection (the voice console picker, or a future phone IVR/text-chat selector using the same `language` field), never inferred from message text.
+- Only the proof-of-concept set of deterministic prompt templates has a Kannada translation (matching the existing Hindi/Hinglish scope from Task 006) - anything without one falls back to English rather than mixing languages awkwardly.
+- MMS-TTS voice quality is research-grade, not a polished commercial voice - expect occasional mispronunciation of numbers, English loanwords (fee amounts, course codes, acronyms), or proper nouns compared to Piper's more mature English voice.
+- Meta's MMS-TTS checkpoints are released under CC-BY-NC 4.0 (non-commercial) - fine for local development/demo use; revisit before any commercial production deployment.
+- Live in-browser language switching mid-conversation is not implemented. The selected language is fully exposed on `Conversation.language`/`VoiceSession.language` and `AgentState.language`/`language_locked` for a future switch-language action to build on, but no UI or API exists yet to change it after a session starts.
+- `torch`/`transformers` add real memory/disk footprint (a few hundred MB of model weights, more RAM once both language models are loaded and kept warm) on top of the Task 023 Ollama/faster-whisper/Piper stack - worth checking against constrained development hardware.
+
+### Testing
+
+Backend: `tests/test_voice_local_providers.py` (`LocalMultilingualTTSProvider` routing for en/hinglish → Piper and hi/kn → MMS, the module-level MMS model cache genuinely staying warm across both separate `synthesize()` calls and separate provider instances, MMS fail-closed behavior via a simulated `transformers` `ImportError`, the STT language-mapping table including `kn`, and the TTS factory now returning/wiring `LocalMultilingualTTSProvider`); `tests/test_agent.py` (an explicitly locked language surviving a Devanagari message that would otherwise flip an *unlocked* conversation to Hindi, a locked Kannada conversation never falling back to English, unlocked conversations still auto-detecting exactly as before, a Kannada-script response rendered through the real orchestrator for a structured fee lookup, and the open-ended system prompt's explicit per-language instruction); `tests/test_colleges.py` (`"kn"` accepted by `is_valid_language`); `tests/test_voice.py` (the voice-session API locking `en`/`hi`/`kn` end to end, an unselected session staying unlocked, and the selected language reaching the STT provider explicitly on a `final_transcript` audio event). No real Ollama server, faster-whisper model, Piper binary, or MMS/`transformers` model is invoked in any test - the same monkeypatch-at-the-seam convention as the rest of Task 023's test suite.
+
+Frontend: `tests/voice-console.test.tsx` gained a language-selection suite (all three options render with a disabled Start button until one is picked, and each of the three codes is sent to the session-creation API and reflected back as the active-language badge once connected); the existing `clickStart()` test helper now selects English first, so all thirteen pre-existing tests exercise the new gate implicitly instead of needing individual updates.
+
+### What is/was not verified end-to-end in this environment
+
+The Ollama/faster-whisper/Piper local voice stack (and the MMS Hindi/Kannada models) were confirmed working independently on the developer's own Windows machine outside this session; running the actual multi-service pipeline (real microphone → real faster-whisper → real orchestrator → real MMS/Piper → real playback) was not exercised here - only the code paths, request/response construction, and fail-closed behavior were, deterministically, via the tests above.
 

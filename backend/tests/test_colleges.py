@@ -57,6 +57,7 @@ def test_is_valid_timezone():
 def test_is_valid_language():
     assert is_valid_language("en")
     assert is_valid_language("hinglish")
+    assert is_valid_language("kn")  # Kannada - Local Voice: English/Hindi/Kannada addendum
     assert not is_valid_language("fr")
 
 

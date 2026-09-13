@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.models.college import College
 
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-SUPPORTED_LANGUAGE_CODES = {"en", "hi", "hinglish"}
+SUPPORTED_LANGUAGE_CODES = {"en", "hi", "hinglish", "kn"}
 
 
 def normalize_slug(raw: str) -> str:

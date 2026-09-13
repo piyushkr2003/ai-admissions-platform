@@ -1,5 +1,24 @@
 import type { VoiceProviderMode } from "@/types/voice";
 
+/** The three languages the local voice stack supports end-to-end
+ * (English/Piper, Hindi + Kannada/MMS-TTS - see docs/development.md
+ * "Local Voice: English/Hindi/Kannada"). The student picks one of these
+ * up front, before any microphone/voice interaction starts - there is
+ * no automatic language detection for the initial conversation, by
+ * product decision (lower latency, more predictable behavior on
+ * CPU-only local inference). */
+export type LanguageCode = "en" | "hi" | "kn";
+
+export const LANGUAGE_OPTIONS: ReadonlyArray<{ code: LanguageCode; label: string }> = [
+  { code: "en", label: "English" },
+  { code: "hi", label: "हिंदी" },
+  { code: "kn", label: "ಕನ್ನಡ" },
+];
+
+export function labelForLanguage(code: string | null | undefined): string {
+  return LANGUAGE_OPTIONS.find((option) => option.code === code)?.label ?? "English";
+}
+
 /** Only ever play back a real, fetchable audio URL. The mock TTS
  * provider returns non-playable `mock://tts/...` references (a
  * deterministic hash, not audio) - attempting to load one as `<audio

@@ -60,7 +60,13 @@ class AgentOrchestrator:
     def handle_message(self, conversation: Conversation, user_text: str) -> AgentTurnResult:
         state = AgentState.from_dict(conversation.state)
         state.turn_count += 1
-        state.language = detect_language(user_text, fallback=state.language or self.college.default_language)
+        if not state.language_locked:
+            # Auto-detection only ever applies when no language was
+            # explicitly selected up front (docs/voice.md "Language
+            # Selection") - a locked language (e.g. "kn", which
+            # detect_language cannot recognize at all) is authoritative
+            # for the entire conversation.
+            state.language = detect_language(user_text, fallback=state.language or self.college.default_language)
 
         self._record_message(conversation, "student", user_text)
 
@@ -181,7 +187,7 @@ class AgentOrchestrator:
 
         if not response_parts:
             fallback = prompts.unknown_fallback(state.language, self._agent_name())
-            response_parts.append(self._open_ended_reply(conversation, user_text, fallback))
+            response_parts.append(self._open_ended_reply(conversation, user_text, fallback, state.language))
 
         response_text = " ".join(part for part in response_parts if part).strip()
 
@@ -461,7 +467,7 @@ class AgentOrchestrator:
     def _agent_name(self) -> str:
         return "Admissions Assistant"
 
-    def _open_ended_reply(self, conversation: Conversation, user_text: str, fallback: str) -> str:
+    def _open_ended_reply(self, conversation: Conversation, user_text: str, fallback: str, language: str) -> str:
         """Bounded LLM assist (Task 016) for input that matched NO
         admissions intent at all. Every fact-bearing response elsewhere in
         this orchestrator always comes from prompts.py/tools, never from
@@ -477,7 +483,7 @@ class AgentOrchestrator:
         try:
             llm = get_llm_provider()
             response = llm.generate([
-                LLMMessage(role="system", content=prompts.open_ended_system_prompt(self.college.name, self._agent_name())),
+                LLMMessage(role="system", content=prompts.open_ended_system_prompt(self.college.name, self._agent_name(), language)),
                 LLMMessage(role="user", content=user_text),
             ])
         except LLMProviderError as exc:

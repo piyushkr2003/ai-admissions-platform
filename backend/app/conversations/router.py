@@ -57,7 +57,11 @@ def create_conversation(payload: ConversationCreate, db: Session = Depends(get_d
         status="active",
         started_at=datetime.now(timezone.utc),
         language=language,
-        state={},
+        # An explicitly requested language is locked in as authoritative
+        # for the whole conversation, exactly like the voice session
+        # endpoints (app/services/voice.py::_initial_conversation_state) -
+        # a caller that didn't request one keeps today's auto-detection.
+        state={"language": language, "language_locked": True} if payload.language else {},
     )
     db.add(conversation)
     db.commit()

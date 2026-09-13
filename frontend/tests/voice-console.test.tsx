@@ -117,7 +117,17 @@ function renderConsole(role: AuthUser["role"] = "college_admin") {
   );
 }
 
+async function selectLanguage(name: RegExp | string = /english/i) {
+  const option = await screen.findByRole("radio", { name });
+  await userEvent.click(option);
+}
+
 async function clickStart() {
+  // The language picker is the first step, before any microphone/voice
+  // interaction can start (Local Voice: English/Hindi/Kannada addendum,
+  // item 2/6) - every existing caller of this helper implicitly exercises
+  // that gate by defaulting to English.
+  await selectLanguage();
   const button = await screen.findByRole("button", { name: /start voice session/i });
   await waitFor(() => expect(button).toBeEnabled());
   await userEvent.click(button);
@@ -147,6 +157,72 @@ describe("VoiceConsole - permission gating", () => {
     renderConsole("counselor");
     expect(await screen.findByText(/do not have permission/i)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /start voice session/i })).not.toBeInTheDocument();
+  });
+});
+
+describe("VoiceConsole - language selection (English/Hindi/Kannada)", () => {
+  it("shows exactly the three language options, with Start disabled until one is chosen", async () => {
+    mockFetch({});
+    renderConsole();
+
+    expect(await screen.findByRole("radio", { name: "English" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "हिंदी" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "ಕನ್ನಡ" })).toBeInTheDocument();
+
+    const startButton = screen.getByRole("button", { name: /start voice session/i });
+    expect(startButton).toBeDisabled();
+
+    await selectLanguage(/हिंदी/);
+    await waitFor(() => expect(startButton).toBeEnabled());
+  });
+
+  it("sends the selected language code to the session API - English", async () => {
+    const fetchImpl = mockFetch({});
+    renderConsole();
+    await selectLanguage("English");
+    await userEvent.click(screen.getByRole("button", { name: /start voice session/i }));
+
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalled());
+    const sessionCall = fetchImpl.mock.calls.find(([input]) => String(input).endsWith("/voice/sessions"));
+    const body = JSON.parse((sessionCall?.[1]?.body as string) ?? "{}");
+    expect(body.language).toBe("en");
+  });
+
+  it("sends the selected language code to the session API - Hindi", async () => {
+    const fetchImpl = mockFetch({});
+    renderConsole();
+    await selectLanguage("हिंदी");
+    await userEvent.click(screen.getByRole("button", { name: /start voice session/i }));
+
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalled());
+    const sessionCall = fetchImpl.mock.calls.find(([input]) => String(input).endsWith("/voice/sessions"));
+    const body = JSON.parse((sessionCall?.[1]?.body as string) ?? "{}");
+    expect(body.language).toBe("hi");
+  });
+
+  it("sends the selected language code to the session API - Kannada", async () => {
+    const fetchImpl = mockFetch({
+      createSession: {
+        status: 201,
+        body: {
+          data: {
+            session_id: "sess-kn", conversation_id: "conv-kn", status: "connecting", language: "kn",
+            provider: "mock", server_url: null, connection_token: "tok", connection_expires_at: "2026-01-01T00:00:00Z",
+            ice_servers: [], greeting: mockGreeting(),
+          },
+          meta: { request_id: "req_1" },
+        },
+      },
+    });
+    renderConsole();
+    await selectLanguage("ಕನ್ನಡ");
+    await userEvent.click(screen.getByRole("button", { name: /start voice session/i }));
+
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalled());
+    const sessionCall = fetchImpl.mock.calls.find(([input]) => String(input).endsWith("/voice/sessions"));
+    const body = JSON.parse((sessionCall?.[1]?.body as string) ?? "{}");
+    expect(body.language).toBe("kn");
+    expect(await screen.findByText("ಕನ್ನಡ")).toBeInTheDocument(); // shown as the active language once connected
   });
 });
 

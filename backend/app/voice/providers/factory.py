@@ -67,11 +67,15 @@ def get_tts_provider() -> TTSProvider:
                 "TTS provider 'local' is selected but PIPER_MODEL_PATH is not configured "
                 "(path to a downloaded Piper .onnx voice model)."
             )
-        from app.voice.providers.local import LocalPiperTTSProvider
+        from app.voice.providers.local import LocalMultilingualTTSProvider, LocalPiperTTSProvider
 
-        return LocalPiperTTSProvider(
+        piper = LocalPiperTTSProvider(
             command=settings.piper_command, model_path=settings.piper_model_path,
             timeout_seconds=settings.piper_timeout_seconds,
+        )
+        return LocalMultilingualTTSProvider(
+            piper_provider=piper, hindi_model_id=settings.mms_hindi_model_id,
+            kannada_model_id=settings.mms_kannada_model_id,
         )
     if not settings.tts_api_key:
         raise ResourceUnavailableError(f"TTS provider '{name}' is selected but no TTS_API_KEY is configured.")

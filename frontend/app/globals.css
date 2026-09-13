@@ -1310,3 +1310,53 @@ ul.stack-tight {
   flex-direction: column;
   gap: 10px;
 }
+
+.voice-console__language-picker {
+  display: grid;
+  gap: 10px;
+}
+
+.voice-console__language-prompt {
+  margin: 0;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.voice-console__language-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.voice-console__language-option {
+  padding: 10px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.voice-console__language-option:hover {
+  border-color: var(--accent);
+}
+
+.voice-console__language-option--selected {
+  border-color: var(--accent);
+  background: var(--accent-soft, var(--surface));
+  color: var(--accent);
+}
+
+.voice-console__language-active {
+  margin-left: auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--muted);
+}

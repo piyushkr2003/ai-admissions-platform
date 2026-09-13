@@ -41,7 +41,7 @@ def _create_college(db: Session, *, name: str, slug: str) -> College:
         country="India",
         timezone="Asia/Kolkata",
         default_language="en",
-        supported_languages=["en", "hi", "hinglish"],
+        supported_languages=["en", "hi", "hinglish", "kn"],
         feature_flags={
             "voice_enabled": False,
             "phone_enabled": False,
@@ -202,7 +202,7 @@ def _seed_nova(db: Session) -> dict:
         agent_name="Nova Assist",
         personality="friendly_professional",
         default_language="en",
-        supported_languages=["en", "hi", "hinglish"],
+        supported_languages=["en", "hi", "hinglish", "kn"],
         greeting_message="Hi! I'm Nova Assist. I can help with courses, eligibility, fees, scholarships, and booking a counselor appointment.",
         fallback_message="I don't have verified information about that yet. I can connect you with an admissions counselor.",
         escalation_message="Let me connect you with an admissions counselor who can help further.",

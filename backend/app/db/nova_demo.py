@@ -124,7 +124,10 @@ def _get_or_create_college(db: Session, data: dict) -> College:
     college.country = location["country"]
     college.timezone = location["timezone"]
     college.default_language = data["languages"][0] if data["languages"] else "en"
-    college.supported_languages = list(data["languages"])
+    # "kn" (Kannada) is a platform capability (Local Voice: English/Hindi/
+    # Kannada addendum), not a fictional college fact, so it's unioned in
+    # here rather than added to nova_demo_data/nova_demo_seed.json.
+    college.supported_languages = sorted(set(data["languages"]) | {"kn"})
     college.feature_flags = {
         **(college.feature_flags or {}),
         "voice_enabled": True,
@@ -386,7 +389,7 @@ def _ensure_agent_config(db: Session, college: College, data: dict) -> AgentConf
         agent_name="Nova Assist",
         personality="friendly_professional",
         default_language=data["languages"][0] if data["languages"] else "en",
-        supported_languages=list(data["languages"]),
+        supported_languages=sorted(set(data["languages"]) | {"kn"}),
         greeting_message=(
             "Hi! I'm Nova Assist. I can help with courses, eligibility, fees, scholarships, "
             "and booking a counselor appointment for Nova Institute of Technology (a fictional demo college)."

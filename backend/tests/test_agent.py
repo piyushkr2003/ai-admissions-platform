@@ -36,6 +36,21 @@ def _new_conversation(db, college_id) -> Conversation:
     return conv
 
 
+def _new_conversation_with_locked_language(db, college_id, language: str) -> Conversation:
+    """Mirrors what app/services/voice.py::_initial_conversation_state and
+    app/conversations/router.py::create_conversation now seed when a
+    caller explicitly requests a language (the voice console's language
+    picker sends exactly this) - the language is authoritative for the
+    whole conversation, never overridden by detect_language()."""
+    conv = Conversation(
+        college_id=college_id, channel="web_voice", session_id="t", status="active",
+        language=language, state={"language": language, "language_locked": True},
+    )
+    db.add(conv)
+    db.flush()
+    return conv
+
+
 def _orchestrator(db, college_id) -> AgentOrchestrator:
     context = get_college_context(db, college_id)
     return AgentOrchestrator(db, context)
@@ -463,6 +478,97 @@ def test_multilingual_eligibility_routing(db):
     assert I.ELIGIBILITY in result.intents
     state = AgentState.from_dict(conv.state)
     assert state.language == "hinglish"
+
+
+# ---------------------------------------------------------------------------
+# Test 17b - Explicit language selection is authoritative (Local Voice:
+# English/Hindi/Kannada addendum) - no automatic detection overrides it.
+# ---------------------------------------------------------------------------
+
+def test_locked_kannada_language_is_never_overridden_by_detection(db):
+    """Kannada has no detect_language() heuristic at all - if the lock
+    didn't work, this conversation's language would silently fall back
+    to "en" on the very first turn."""
+    seed_demo_data(db)
+    nova = _college(db, NOVA_SLUG)
+    conv = _new_conversation_with_locked_language(db, nova.id, "kn")
+    orch = _orchestrator(db, nova.id)
+
+    result = orch.handle_message(conv, "Tell me about B.Tech CSE.")
+
+    assert result.state is not None
+    assert result.state.language == "kn"
+    assert result.state.language_locked is True
+
+
+def test_locked_hindi_language_survives_a_devanagari_message(db):
+    """Without the lock, detect_language() would still say "hi" here by
+    coincidence - the real proof is the next test, where locked English
+    survives Devanagari text that would otherwise flip it to "hi"."""
+    seed_demo_data(db)
+    nova = _college(db, NOVA_SLUG)
+    conv = _new_conversation_with_locked_language(db, nova.id, "hi")
+    orch = _orchestrator(db, nova.id)
+
+    result = orch.handle_message(conv, "Tell me about B.Tech CSE.")
+    assert result.state.language == "hi"
+
+
+def test_locked_english_language_survives_devanagari_text_mid_conversation(db):
+    seed_demo_data(db)
+    nova = _college(db, NOVA_SLUG)
+    conv = _new_conversation_with_locked_language(db, nova.id, "en")
+    orch = _orchestrator(db, nova.id)
+
+    orch.handle_message(conv, "Tell me about B.Tech CSE.")
+    result = orch.handle_message(conv, "सीएसई की फीस कितनी है?")
+
+    assert result.state.language == "en"
+
+
+def test_unlocked_conversation_still_auto_detects_language_unchanged(db):
+    """Existing behavior (no explicit language requested) must be
+    completely unaffected by the locking mechanism."""
+    seed_demo_data(db)
+    nova = _college(db, NOVA_SLUG)
+    conv = _new_conversation(db, nova.id)  # no language selection - state={}
+    orch = _orchestrator(db, nova.id)
+
+    result = orch.handle_message(conv, "सीएसई की फीस कितनी है?")
+    assert result.state.language == "hi"
+    assert result.state.language_locked is False
+
+
+def test_kannada_prompt_templates_render_through_the_orchestrator(db):
+    seed_demo_data(db)
+    nova = _college(db, NOVA_SLUG)
+    conv = _new_conversation_with_locked_language(db, nova.id, "kn")
+    orch = _orchestrator(db, nova.id)
+
+    orch.handle_message(conv, "Tell me about B.Tech CSE.")
+    result = orch.handle_message(conv, "What is the CSE fee?")
+
+    assert "get_fee_structure" in result.tools_used
+    assert "₹" in result.response_text
+    # Kannada script, not an English fallback string.
+    assert any("ಀ" <= ch <= "೿" for ch in result.response_text)
+
+
+def test_open_ended_system_prompt_gives_explicit_language_instruction_not_detection():
+    from app.agent import prompts
+
+    en_prompt = prompts.open_ended_system_prompt("Nova Institute", "Nova Assist", "en")
+    hi_prompt = prompts.open_ended_system_prompt("Nova Institute", "Nova Assist", "hi")
+    kn_prompt = prompts.open_ended_system_prompt("Nova Institute", "Nova Assist", "kn")
+
+    assert "Respond in English" in en_prompt
+    assert "Hindi" in hi_prompt
+    assert "Hinglish" in hi_prompt  # item 12: natural Hinglish drift is explicitly allowed within Hindi
+    assert "Kannada" in kn_prompt
+    # The model is told the language directly - never asked to figure it out itself.
+    for prompt in (en_prompt, hi_prompt, kn_prompt):
+        assert "detect the language" not in prompt.lower()
+        assert "identify the language" not in prompt.lower()
 
 
 # ---------------------------------------------------------------------------

@@ -264,6 +264,92 @@ def test_final_transcript_with_audio_base64_runs_server_side_stt_first(client, d
     assert body["response_text"]
 
 
+def test_create_web_session_with_kannada_locks_conversation_language(client, db):
+    """Local Voice: English/Hindi/Kannada addendum - item 2/3/6: the voice
+    console's language selector reaches the real session/conversation
+    state, and becomes authoritative (never auto-detected away)."""
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    resp = client.post(
+        "/api/v1/voice/sessions", json={"college_id": str(nova.id), "channel": "web_voice", "language": "kn"},
+    )
+    assert resp.status_code == 201, resp.text
+    data = resp.json()["data"]
+    assert data["language"] == "kn"
+
+    conversation = db.get(Conversation, uuid.UUID(data["conversation_id"]))
+    assert conversation.language == "kn"
+    state = AgentState.from_dict(conversation.state)
+    assert state.language == "kn"
+    assert state.language_locked is True
+
+
+def test_create_web_session_with_hindi_selection(client, db):
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    resp = client.post(
+        "/api/v1/voice/sessions", json={"college_id": str(nova.id), "channel": "web_voice", "language": "hi"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["language"] == "hi"
+
+
+def test_create_web_session_with_english_selection(client, db):
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    resp = client.post(
+        "/api/v1/voice/sessions", json={"college_id": str(nova.id), "channel": "web_voice", "language": "en"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["language"] == "en"
+
+
+def test_create_web_session_without_language_does_not_lock_state(client, db):
+    """Backward compatibility: a caller that never selects a language
+    (no UI change on its end) gets today's unlocked, auto-detecting
+    behavior exactly as before this addendum."""
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    data = _create_web_session(client, str(nova.id))
+    conversation = db.get(Conversation, uuid.UUID(data["conversation_id"]))
+    state = AgentState.from_dict(conversation.state)
+    assert state.language_locked is False
+
+
+def test_final_transcript_audio_passes_the_locked_language_to_stt_explicitly(client, db, monkeypatch):
+    """Item 9: the selected language reaches the STT provider explicitly
+    instead of relying on auto-detection."""
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    resp = client.post(
+        "/api/v1/voice/sessions", json={"college_id": str(nova.id), "channel": "web_voice", "language": "kn"},
+    )
+    session_id = resp.json()["data"]["session_id"]
+
+    captured = {}
+    from app.voice.providers.mock import MockSTTProvider as _RealMockSTTProvider
+
+    class _CapturingSTTProvider(_RealMockSTTProvider):
+        def recognize(self, audio_bytes, *, language=None):
+            captured["language"] = language
+            return super().recognize(audio_bytes, language=language)
+
+    monkeypatch.setattr("app.voice.router.get_stt_provider", lambda: _CapturingSTTProvider())
+
+    audio_base64 = base64.b64encode(b"hello").decode("ascii")
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session_id}/events",
+        json={"event_type": "final_transcript", "audio_base64": audio_base64},
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["language"] == "kn"
+
+
 def test_final_transcript_rejects_invalid_audio_base64(client, db):
     seed_demo_data(db)
     db.commit()
