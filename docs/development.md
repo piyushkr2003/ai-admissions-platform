@@ -2635,11 +2635,17 @@ See docs/voice.md section 73 for the full architecture, provider boundaries, and
 
 ```text
 # LLM (bounded fallback only - see docs/voice.md 73.3; agent works fully without this)
-AGENT_LLM_PROVIDER=mock         # "mock" (default) or "anthropic"
+AGENT_LLM_PROVIDER=mock         # "mock" (default), "anthropic", or "gemini"
 LLM_API_KEY=                    # required if AGENT_LLM_PROVIDER=anthropic
 LLM_MODEL=claude-sonnet-4-5-20250929
 LLM_API_BASE_URL=https://api.anthropic.com
 LLM_TIMEOUT_SECONDS=8.0
+
+# Gemini LLM provider (alternative to anthropic - same LLMProvider
+# interface, same single call site in AgentOrchestrator._open_ended_reply)
+GOOGLE_API_KEY=                 # required if AGENT_LLM_PROVIDER=gemini
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_API_BASE_URL=https://generativelanguage.googleapis.com
 
 # Realtime voice worker (irrelevant while VOICE_TRANSPORT_PROVIDER=mock)
 LIVEKIT_WORKER_IDENTITY=admissions-agent
@@ -2648,7 +2654,7 @@ VOICE_WORKER_SAMPLE_RATE=48000
 VOICE_WORKER_CHANNELS=1
 ```
 
-Selecting `AGENT_LLM_PROVIDER=anthropic` without `LLM_API_KEY` raises `RESOURCE_UNAVAILABLE` the moment the LLM is actually consulted (not at startup, since the LLM is optional), and fails application startup outright when `APP_ENV=production` - the same fail-closed pattern as every other provider.
+Selecting `AGENT_LLM_PROVIDER=anthropic` without `LLM_API_KEY`, or `AGENT_LLM_PROVIDER=gemini` without `GOOGLE_API_KEY`, raises `RESOURCE_UNAVAILABLE` the moment the LLM is actually consulted (not at startup, since the LLM is optional), and fails application startup outright when `APP_ENV=production` - the same fail-closed pattern as every other provider. `GOOGLE_API_KEY` is sent only in the `x-goog-api-key` request header to `generativelanguage.googleapis.com` (never in the URL) and is never logged.
 
 ### Local development
 
@@ -2676,7 +2682,7 @@ To exercise the full realtime path: set `VOICE_TRANSPORT_PROVIDER=livekit` and t
 ### Testing
 
 Backend:
-- `tests/test_llm_provider.py` - provider selection/fail-closed behavior, Anthropic request construction/response parsing, timeout/HTTP-error/malformed-response handling, no-secret-logging. No network calls (`urllib.request.urlopen` is monkeypatched).
+- `tests/test_llm_provider.py` - provider selection/fail-closed behavior, Anthropic and Gemini request construction/response parsing, timeout/HTTP-error/malformed-response/safety-block handling, no-secret-logging for both real adapters. No network calls (`urllib.request.urlopen` is monkeypatched).
 - `tests/test_orchestrator_llm_fallback.py` - proves the LLM is never invoked for a grounded/factual intent (even with a "lying" fake LLM configured), that safety refusals stay fully static, that the default mock provider reproduces the exact pre-Task-016 static text, and that any LLM failure falls back gracefully.
 - `tests/test_voice_pcm.py` - pure-Python WAV/PCM helpers (round-trip, RMS energy, frame chunking) used by the worker; no dependency beyond the standard library.
 - `tests/test_voice_worker.py` - the realtime worker's full lifecycle against an in-memory `FakeRoomClient` stand-in for `livekit.rtc` (no real LiveKit server is reachable here): session/room-token mapping, tenant isolation, a full grounded-fee-lookup turn with real audio published back, eligibility lookup, conversation memory across turns, appointment booking parity with the existing REST-level test, barge-in, participant/room disconnect handling, worker crash recovery, prompt-injection resistance, and cross-tenant knowledge isolation.

@@ -26,4 +26,13 @@ def get_llm_provider() -> LLMProvider:
             api_key=settings.llm_api_key, model=settings.llm_model,
             base_url=settings.llm_api_base_url, timeout_seconds=settings.llm_timeout_seconds,
         )
+    if name == "gemini":
+        if not settings.google_api_key:
+            raise ResourceUnavailableError("LLM provider 'gemini' is selected but no GOOGLE_API_KEY is configured.")
+        from app.agent.providers.gemini import GeminiLLMProvider
+
+        return GeminiLLMProvider(
+            api_key=settings.google_api_key, model=settings.gemini_model,
+            base_url=settings.gemini_api_base_url, timeout_seconds=settings.llm_timeout_seconds,
+        )
     raise ResourceUnavailableError(f"LLM provider '{name}' has no adapter implemented yet.")

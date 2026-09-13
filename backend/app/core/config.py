@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 8.0
     agent_max_tool_calls_per_turn: int = 6
 
+    # Gemini LLM provider (alternative to anthropic, same LLMProvider
+    # interface and same single call site - see app/agent/providers/gemini.py).
+    google_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_api_base_url: str = "https://generativelanguage.googleapis.com"
+
     # Future providers
     stt_api_key: str = ""
     tts_api_key: str = ""
@@ -114,9 +120,13 @@ class Settings(BaseSettings):
                 "LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must all be set in production "
                 "when VOICE_TRANSPORT_PROVIDER=livekit"
             )
-        if self.agent_llm_provider.lower() not in ("mock",) and not self.llm_api_key:
+        if self.agent_llm_provider.lower() == "anthropic" and not self.llm_api_key:
             problems.append(
                 f"LLM_API_KEY must be set in production when AGENT_LLM_PROVIDER={self.agent_llm_provider}"
+            )
+        if self.agent_llm_provider.lower() == "gemini" and not self.google_api_key:
+            problems.append(
+                f"GOOGLE_API_KEY must be set in production when AGENT_LLM_PROVIDER={self.agent_llm_provider}"
             )
         if problems:
             raise RuntimeError(

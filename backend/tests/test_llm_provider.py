@@ -16,6 +16,7 @@ import pytest
 from app.agent.providers.anthropic import AnthropicLLMProvider
 from app.agent.providers.base import LLMMessage, LLMProviderError
 from app.agent.providers.factory import get_llm_provider
+from app.agent.providers.gemini import GeminiLLMProvider
 from app.agent.providers.mock import MockLLMProvider
 from app.core.config import get_settings
 from app.core.errors import ResourceUnavailableError
@@ -139,6 +140,156 @@ def test_anthropic_provider_raises_on_empty_text_content(monkeypatch):
     provider = AnthropicLLMProvider(api_key="sk-x", model="m", base_url="https://api.anthropic.com", timeout_seconds=5)
     with pytest.raises(LLMProviderError):
         provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_factory_fails_closed_when_gemini_selected_without_api_key(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "gemini")
+    monkeypatch.setattr(settings, "google_api_key", "")
+    with pytest.raises(ResourceUnavailableError):
+        get_llm_provider()
+
+
+def test_factory_returns_gemini_provider_when_configured(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "gemini")
+    monkeypatch.setattr(settings, "google_api_key", "test-key")
+    provider = get_llm_provider()
+    assert isinstance(provider, GeminiLLMProvider)
+
+
+def test_gemini_provider_constructor_requires_api_key():
+    with pytest.raises(ValueError):
+        GeminiLLMProvider(api_key="", model="m", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+
+
+def test_gemini_provider_sends_expected_request_and_parses_response(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _FakeHTTPResponse(
+            {
+                "candidates": [
+                    {"content": {"role": "model", "parts": [{"text": "Sure, happy to help!"}]}, "finishReason": "STOP"}
+                ],
+                "modelVersion": "gemini-2.5-flash",
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    provider = GeminiLLMProvider(
+        api_key="goog-secret-value", model="gemini-2.5-flash",
+        base_url="https://generativelanguage.googleapis.com", timeout_seconds=5,
+    )
+    result = provider.generate(
+        [LLMMessage(role="system", content="You are helpful."), LLMMessage(role="user", content="Hi there")],
+        temperature=0.3,
+    )
+
+    assert result.content == "Sure, happy to help!"
+    assert result.model == "gemini-2.5-flash"
+    assert captured["url"] == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    assert captured["headers"]["x-goog-api-key"] == "goog-secret-value"
+    assert "goog-secret-value" not in captured["url"]
+    assert captured["body"]["systemInstruction"] == {"parts": [{"text": "You are helpful."}]}
+    assert captured["body"]["contents"] == [{"role": "user", "parts": [{"text": "Hi there"}]}]
+    assert captured["body"]["generationConfig"]["temperature"] == 0.3
+    assert captured["timeout"] == 5
+
+
+def test_gemini_provider_maps_assistant_role_to_model_role(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeHTTPResponse(
+            {"candidates": [{"content": {"parts": [{"text": "ok"}]}}], "modelVersion": "gemini-2.5-flash"}
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GeminiLLMProvider(api_key="k", model="gemini-2.5-flash", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+    provider.generate(
+        [
+            LLMMessage(role="user", content="Hi"),
+            LLMMessage(role="assistant", content="Hello!"),
+            LLMMessage(role="user", content="How are you?"),
+        ]
+    )
+    assert captured["body"]["contents"] == [
+        {"role": "user", "parts": [{"text": "Hi"}]},
+        {"role": "model", "parts": [{"text": "Hello!"}]},
+        {"role": "user", "parts": [{"text": "How are you?"}]},
+    ]
+
+
+def test_gemini_provider_raises_on_http_error(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GeminiLLMProvider(api_key="k", model="m", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_gemini_provider_raises_on_timeout(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GeminiLLMProvider(api_key="k", model="m", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_gemini_provider_raises_on_malformed_response(monkeypatch):
+    class _BadResponse(_FakeHTTPResponse):
+        def read(self) -> bytes:
+            return b"not json"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None: _BadResponse({}))
+    provider = GeminiLLMProvider(api_key="k", model="m", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_gemini_provider_raises_on_empty_candidates(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda request, timeout=None: _FakeHTTPResponse({"candidates": [], "modelVersion": "m"})
+    )
+    provider = GeminiLLMProvider(api_key="k", model="m", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_gemini_provider_raises_on_safety_blocked_candidate_with_no_parts(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout=None: _FakeHTTPResponse(
+            {"candidates": [{"finishReason": "SAFETY"}], "modelVersion": "m"}
+        ),
+    )
+    provider = GeminiLLMProvider(api_key="k", model="m", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_gemini_provider_never_logs_the_api_key(monkeypatch, caplog):
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GeminiLLMProvider(api_key="goog-super-secret", model="m", base_url="https://generativelanguage.googleapis.com", timeout_seconds=5)
+    with caplog.at_level(logging.DEBUG, logger="app.agent.llm"):
+        with pytest.raises(LLMProviderError):
+            provider.generate([LLMMessage(role="user", content="hi")])
+    logged_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "goog-super-secret" not in logged_text
 
 
 def test_anthropic_provider_never_logs_the_api_key(monkeypatch, caplog):
