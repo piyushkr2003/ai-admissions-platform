@@ -115,13 +115,34 @@ def get_session(session_id: uuid.UUID, db: Session = Depends(get_db)) -> dict:
 def post_event(session_id: uuid.UUID, payload: VoiceEventCreate, db: Session = Depends(get_db)) -> dict:
     service = VoiceSessionService(db)
     session = service.get_or_404(session_id)
+    text = payload.text
+    if text is None and payload.audio_base64:
+        # Mirrors the telephony webhook's identical audio_base64 -> STT
+        # handling below - the only local-mode-relevant addition to this
+        # endpoint, letting a browser recording (Task 023) drive the same
+        # final_transcript path a real STT provider's own callback would.
+        try:
+            audio_bytes = base64.b64decode(payload.audio_base64)
+        except (ValueError, TypeError) as exc:
+            raise ValidationAppError("Invalid audio_base64 payload.") from exc
+        stt_result = get_stt_provider().recognize(audio_bytes, language=session.language)
+        text = stt_result.text
+        recognized_from_audio = True
+    else:
+        recognized_from_audio = False
     try:
-        result = service.record_event(session, event_type=payload.event_type, text=payload.text, event_id=payload.event_id)
+        result = service.record_event(session, event_type=payload.event_type, text=text, event_id=payload.event_id)
     except AppError:
         db.rollback()
         raise
     db.commit()
     result.pop("_tts_audio_bytes", None)  # internal-only; never part of the HTTP contract
+    if recognized_from_audio:
+        # The caller sent audio, not text, so it has no other way to know
+        # what was actually recognized - surface it for display (e.g. the
+        # voice console's transcript panel) without changing anything
+        # about the existing text-based contract.
+        result["recognized_text"] = text
     return envelope(result)
 
 

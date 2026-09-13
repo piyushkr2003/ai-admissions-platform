@@ -11,6 +11,7 @@ speech.
 """
 from __future__ import annotations
 
+import base64
 import logging
 import time
 import uuid
@@ -73,6 +74,26 @@ def _resolve_language(requested: str | None, settings: dict, college: CollegeCon
     return default
 
 
+def _playable_audio_url(tts_result) -> str | None:
+    """Returns a URL the browser's `<audio>` element can actually play.
+
+    The mock provider's `audio_url` (`mock://tts/...`) is deliberately
+    left untouched - it is a synthetic tone, not real speech, and the
+    frontend intentionally treats it as non-playable (see
+    frontend/features/voice/voice-console-helpers.ts). A real provider
+    (Gemini, or the local Task 023 Whisper/Ollama/Piper stack) returns
+    `audio_url=None` alongside real WAV bytes in `audio_bytes` - for
+    those, build a `data:` URI so the exact same REST event response
+    already consumed by the voice console (no LiveKit/transport changes)
+    can play genuine synthesized speech without a separate file-serving
+    endpoint."""
+    if tts_result.audio_url:
+        return tts_result.audio_url
+    if tts_result.audio_bytes:
+        return f"data:audio/wav;base64,{base64.b64encode(tts_result.audio_bytes).decode('ascii')}"
+    return None
+
+
 def _greeting_text(config: AgentConfig | None, college: CollegeContext) -> str:
     settings = _voice_settings_for(config)
     if settings.get("greeting_override"):
@@ -118,7 +139,7 @@ class VoiceSessionService:
         settings = _voice_settings_for(config)
         voice_id = settings.get("voice_id") or (config.voice_id if config else None)
         tts_result = get_tts_provider().synthesize(text, language=conversation.language, voice_id=voice_id)
-        return {"text": text, "audio_url": tts_result.audio_url, "audio_duration_ms": tts_result.duration_ms}
+        return {"text": text, "audio_url": _playable_audio_url(tts_result), "audio_duration_ms": tts_result.duration_ms}
 
     # ------------------------------------------------------------------
     # Session creation
@@ -404,7 +425,7 @@ class VoiceSessionService:
             tts_result = get_tts_provider().synthesize(
                 turn_result.response_text, language=conversation.language, voice_id=settings.get("voice_id"),
             )
-            audio_url, audio_duration_ms, tts_error = tts_result.audio_url, tts_result.duration_ms, None
+            audio_url, audio_duration_ms, tts_error = _playable_audio_url(tts_result), tts_result.duration_ms, None
             audio_bytes = tts_result.audio_bytes
         except ResourceUnavailableError as exc:
             logger.warning("voice.tts_failed session_id=%s error=%s", session.id, exc.message)

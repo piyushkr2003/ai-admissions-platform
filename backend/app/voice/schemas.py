@@ -13,6 +13,14 @@ class VoiceSessionCreate(BaseModel):
 class VoiceEventCreate(BaseModel):
     event_type: str = Field(min_length=1, max_length=50)
     text: str | None = Field(default=None, max_length=4000)
+    # Base64-encoded recorded audio for the web channel (Task 023 - Local
+    # Free Demo Mode), mirroring the telephony webhook's existing
+    # `audio_base64` field (app/voice/providers/base.py's
+    # InboundCallEvent). When provided without `text` on a
+    # final_transcript event, the router runs server-side STT before
+    # handing the recognized text to VoiceSessionService, exactly like
+    # the phone channel already does - no VoiceSessionService change.
+    audio_base64: str | None = Field(default=None)
     event_id: str | None = Field(default=None, max_length=255)
 
 

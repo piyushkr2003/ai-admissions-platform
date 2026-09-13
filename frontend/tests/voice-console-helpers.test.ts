@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  arrayBufferToBase64,
   describeMicrophoneError,
   describeTerminationReason,
   isPlayableAudioUrl,
@@ -13,14 +14,39 @@ describe("isPlayableAudioUrl", () => {
     expect(isPlayableAudioUrl("blob:http://localhost/abc")).toBe(true);
   });
 
+  it("accepts a data: audio URI (Task 023 - real provider audio embedded by the backend)", () => {
+    expect(isPlayableAudioUrl("data:audio/wav;base64,UklGRg==")).toBe(true);
+  });
+
   it("rejects the mock provider's non-playable reference scheme", () => {
     expect(isPlayableAudioUrl("mock://tts/abcd1234")).toBe(false);
+  });
+
+  it("rejects a non-audio data: URI", () => {
+    expect(isPlayableAudioUrl("data:text/plain;base64,aGVsbG8=")).toBe(false);
   });
 
   it("rejects null/undefined/empty", () => {
     expect(isPlayableAudioUrl(null)).toBe(false);
     expect(isPlayableAudioUrl(undefined)).toBe(false);
     expect(isPlayableAudioUrl("")).toBe(false);
+  });
+});
+
+describe("arrayBufferToBase64", () => {
+  it("round-trips small buffers correctly", () => {
+    const bytes = new Uint8Array([0, 1, 2, 253, 254, 255]);
+    const encoded = arrayBufferToBase64(bytes.buffer);
+    const decoded = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
+    expect(Array.from(decoded)).toEqual(Array.from(bytes));
+  });
+
+  it("handles buffers larger than one chunk without overflowing the call stack", () => {
+    const bytes = new Uint8Array(0x8000 * 3 + 17).fill(7);
+    const encoded = arrayBufferToBase64(bytes.buffer);
+    const decoded = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
+    expect(decoded.length).toBe(bytes.length);
+    expect(decoded.every((b) => b === 7)).toBe(true);
   });
 });
 

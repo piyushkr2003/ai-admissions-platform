@@ -2749,3 +2749,87 @@ GEMINI_VOICE_TIMEOUT_SECONDS=8.0
 - `scripts/smoke_test_gemini_voice.py` is a manual, non-pytest script a developer runs locally with a real `GOOGLE_API_KEY` to confirm the adapters work against the live API (synthesizes a sample sentence, then transcribes it back). It prints only non-secret metadata (byte sizes, duration, recognized text) and refuses to run at all without a real key configured - see docs/development.md's Task 017 addendum for usage.
 - Real-world transcription accuracy for Hindi/Hinglish code-switched speech, real TTS prosody/latency, and Gemini's actual voice-catalog behavior are therefore unverified in this environment; the request/response contract, error handling, and integration with the existing worker/orchestrator are verified.
 
+---
+
+# 75. Task 023 Implementation Status (Addendum) - Local Free Demo Mode
+
+Every prior addendum in this document assumed a paid cloud STT/TTS/LLM vendor was reachable. Task 023 adds a genuinely free, fully local alternative - no API key, no per-request cost, no data leaving the developer's machine - selected through the *exact same* provider-selection settings every other adapter already uses (`STT_PROVIDER`, `TTS_PROVIDER`, `AGENT_LLM_PROVIDER`), not a new competing switch. `VoiceSessionService`, `AgentOrchestrator`, the LiveKit transport, and the realtime worker required **zero changes** - this is strictly three new adapters plus one small, additive REST extension.
+
+## 75.1 What "local mode" is
+
+Set all three to `local`:
+
+```text
+STT_PROVIDER=local
+TTS_PROVIDER=local
+AGENT_LLM_PROVIDER=local
+```
+
+| Concern | Local implementation | Why this one |
+|---|---|---|
+| STT | `faster-whisper` (`app/voice/providers/local.py::LocalWhisperSTTProvider`) | Prebuilt pip wheels - no C++ toolchain to build whisper.cpp from source on Windows. Also decodes compressed browser audio (webm/opus) directly via ffmpeg/PyAV, not just raw PCM. |
+| LLM | Ollama (`app/agent/providers/local.py::OllamaLLMProvider`) | Native Windows installer, simple local HTTP API, wide model selection. |
+| TTS | Piper CLI (`app/voice/providers/local.py::LocalPiperTTSProvider`) | Ships a single prebuilt executable per platform - no Python C-extension build, no `espeak-ng` phonemizer packaging friction (the reason Kokoro was *not* chosen, per the fallback this task's own brief allowed). |
+
+`VOICE_TRANSPORT_PROVIDER` is unaffected by local mode - it stays `mock` (no LiveKit account needed at all for the free demo; LiveKit remains fully available as a separate, unmodified production option, selected the same way it always was).
+
+## 75.2 Architecture - why no VoiceSessionService/orchestrator changes were needed
+
+```text
+Browser microphone (MediaRecorder, push-to-talk)
+      |
+POST /api/v1/voice/sessions/{id}/events   { event_type: "final_transcript", audio_base64: "..." }
+      |
+app/voice/router.py::post_event - NEW: when text is absent and audio_base64
+      |   is present, runs get_stt_provider().recognize() server-side first -
+      |   this mirrors the phone webhook's identical existing audio_base64
+      |   handling (docs/voice.md section 11) byte-for-byte, just added to
+      |   the web channel too.
+      v
+VoiceSessionService.record_event()   <- UNCHANGED, same method every channel uses
+      |
+AgentOrchestrator.handle_message()   <- UNCHANGED - deterministic tools/RAG for
+      |                                  facts, get_llm_provider() (now possibly
+      |                                  Ollama) only for the one existing
+      |                                  open-ended-reply call site
+      v
+get_tts_provider().synthesize()      <- UNCHANGED call site, now possibly Piper
+      |
+app/services/voice.py::_playable_audio_url()  <- NEW: builds a
+      |   data:audio/wav;base64,... URI from real audio_bytes when the
+      |   provider has no separate hosted URL (Gemini and local both hit
+      |   this - mock's non-playable "mock://tts/..." reference is left
+      |   untouched, matching its existing intentional design)
+      v
+Same REST event response the console already consumed -> <audio src> plays it
+```
+
+Because the web event endpoint and the TTS response already flow through one shared code path regardless of channel/provider, adding local-mode audio in and out required exactly two small additions (`audio_base64` accepted on input, a `data:` URI produced on output) rather than any new session/transport/orchestrator machinery.
+
+## 75.3 Frontend - "hold to talk" (Task 023)
+
+`frontend/features/voice/voice-console.tsx`'s non-LiveKit branch (`mode !== "livekit"`, i.e. `VOICE_TRANSPORT_PROVIDER=mock`) now shows a **"Hold to talk"** button alongside the pre-existing typed-transcript composer (kept for quick manual testing, not replaced). Holding it starts a `MediaRecorder` on the same `getUserMedia` stream `handleStart()` already requests (previously only ever used to hold browser mic permission open in mock mode - now actually recorded from); releasing it stops the recording, base64-encodes the clip (`arrayBufferToBase64`, chunked to avoid a call-stack overflow on longer clips), and posts it as `audio_base64` on a `final_transcript` event - the same event type and endpoint typed messages already use. The response's new `recognized_text` field (populated only when the request came in as audio, since the browser has no transcript of its own) replaces a "(voice message - transcribing...)" placeholder in the transcript panel once the server-side STT result comes back.
+
+## 75.4 Fail-closed behavior
+
+Every local provider fails the same way every cloud provider does - `ResourceUnavailableError`/`LLMProviderError`, never a fabricated transcript or invented audio:
+
+- **Whisper**: `faster-whisper` not installed -> clear pip-install message. Model fails to load (first-run download needs internet once) -> `ResourceUnavailableError`. Unsupported/corrupt audio -> empty transcript (same "Sorry, I didn't catch that" path every STT failure already takes), never a guess.
+- **Piper**: executable not found on `PATH`/configured path -> `ResourceUnavailableError` at provider construction (factory time), before ever attempting synthesis. Non-zero exit or timeout -> `ResourceUnavailableError`.
+- **Ollama**: connection refused (server not running) or HTTP 404 (model not pulled) -> `LLMProviderError` with an actionable message (`ollama serve` / `ollama pull <model>`). Since the LLM is only ever consulted for the existing bounded open-ended-reply fallback, this failure is invisible to the student - the deterministic static template answers instead, exactly as already documented in section 73.3 for every other LLM provider.
+
+`Settings.validate_for_production()` rejects `STT_PROVIDER=local`, `TTS_PROVIDER=local`, and `AGENT_LLM_PROVIDER=local` outright - this is a free *local demo* mode, not a production deployment target.
+
+## 75.5 Multi-tenancy, counselor escalation, and knowledge upload are unaffected
+
+None of these needed any change, because none of them depend on which STT/TTS/LLM provider is active:
+
+- **Multi-college**: every tenant-scoped query/tool/RAG call already resolves `college_id` from trusted context, not from the provider layer - Nova and Aurora remain fully isolated in local mode exactly as in cloud mode.
+- **Counselor escalation**: "Can I talk to someone?" is a deterministic intent match (`app/agent/intents.py`) routed to `check_counselor_availability`/`book_appointment`/`escalate_to_counselor` - these tools are called the same way regardless of which LLM (if any) is configured, since the LLM is never consulted for tool selection on a recognized intent (section 73.3).
+- **Knowledge upload/RAG**: `POST /api/v1/knowledge/sources` (PDF/CSV/FAQ ingestion, `app/rag/ingestion/`) is entirely provider-independent - it was not touched, and local-mode conversations retrieve through the identical tenant-scoped `RetrievalService` cloud-mode conversations use.
+
+## 75.6 What was NOT live-tested (no local Ollama/Whisper/Piper installed in this environment)
+
+- No real Ollama server, faster-whisper model download, or Piper binary was invoked anywhere in this environment. `tests/test_voice_local_providers.py` monkeypatches `subprocess.run` (Piper) and `urllib.request.urlopen` (Ollama), and exercises the *real* `ImportError` path for `faster-whisper` (confirmed not installed here) rather than mocking it away.
+- Real-world local transcription/generation/synthesis quality, latency, and RAM/CPU usage on an actual developer laptop are therefore unverified here - see docs/development.md's Task 023 addendum for the exact install/run steps a developer follows to verify this themselves.
+

@@ -156,7 +156,7 @@ describe("VoiceConsole - mock vs live labeling", () => {
     renderConsole();
     await clickStart();
     expect(await screen.findByText("MOCK")).toBeInTheDocument();
-    expect(await screen.findByText(/mock voice transport/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no realtime transport connected/i)).toBeInTheDocument();
   });
 
   it("labels a livekit-provider session as LIVE and connects through the LiveKit wrapper", async () => {

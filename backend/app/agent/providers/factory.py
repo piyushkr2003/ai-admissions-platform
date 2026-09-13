@@ -35,4 +35,11 @@ def get_llm_provider() -> LLMProvider:
             api_key=settings.google_api_key, model=settings.gemini_model,
             base_url=settings.gemini_api_base_url, timeout_seconds=settings.llm_timeout_seconds,
         )
+    if name == "local":
+        from app.agent.providers.local import OllamaLLMProvider
+
+        return OllamaLLMProvider(
+            base_url=settings.ollama_base_url, model=settings.ollama_model,
+            timeout_seconds=settings.ollama_timeout_seconds,
+        )
     raise ResourceUnavailableError(f"LLM provider '{name}' has no adapter implemented yet.")

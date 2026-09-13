@@ -9,6 +9,7 @@ import { TextInput } from "@/components/ui/form";
 import { Notice } from "@/components/ui/notice";
 import { PageHeader } from "@/features/dashboard/page-header";
 import {
+  arrayBufferToBase64,
   describeMicrophoneError,
   describeTerminationReason,
   isPlayableAudioUrl,
@@ -21,7 +22,7 @@ import { conversationsApi } from "@/lib/api/conversations";
 import { voiceApi } from "@/lib/api/voice";
 import { connectVoiceRoom, type VoiceRoomHandle } from "@/lib/voice/livekit-room";
 import { hasFrontendPermission } from "@/lib/rbac";
-import type { VoiceSessionCreateResponse } from "@/types/voice";
+import type { VoiceEventResponse, VoiceSessionCreateResponse } from "@/types/voice";
 
 const TRANSCRIPT_POLL_INTERVAL_MS = 2000;
 
@@ -61,10 +62,13 @@ export function VoiceConsole() {
   const [draft, setDraft] = useState("");
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
   const [endedMessage, setEndedMessage] = useState<string | null>(null);
+  const [isRecording, setIsRecording] = useState(false);
 
   const roomRef = useRef<VoiceRoomHandle | null>(null);
   const micStreamRef = useRef<MediaStream | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   const appendEntry = useCallback((speaker: TranscriptEntry["speaker"], text: string) => {
     setTranscript((current) => [...current, { id: nextEntryId(), speaker, text }]);
@@ -208,33 +212,25 @@ export function VoiceConsole() {
     setStatus("connected");
   }
 
-  async function handleSubmitTranscript(event: React.FormEvent) {
-    event.preventDefault();
-    const text = draft.trim();
-    if (!text || !session) {
-      return;
-    }
-    setDraft("");
-
-    if (isAgentSpeaking) {
+  const interruptIfAgentSpeaking = useCallback(
+    async (currentSession: VoiceSessionCreateResponse) => {
+      if (!isAgentSpeaking) {
+        return;
+      }
       audioRef.current?.pause();
       setIsAgentSpeaking(false);
       try {
-        await voiceApi.postEvent(apiClient, session.session_id, { event_type: "interruption" });
+        await voiceApi.postEvent(apiClient, currentSession.session_id, { event_type: "interruption" });
       } catch {
         // best-effort - the session may already have moved on
       }
       appendEntry("system", "(interrupted)");
-    }
+    },
+    [apiClient, appendEntry, isAgentSpeaking],
+  );
 
-    appendEntry("student", text);
-
-    try {
-      const response = await voiceApi.postEvent(apiClient, session.session_id, {
-        event_type: "final_transcript",
-        text,
-      });
-      const body = response.data;
+  const applyEventResponse = useCallback(
+    async (body: VoiceEventResponse) => {
       if (body.status === "completed" || body.status === "failed") {
         appendEntry("system", body.response_text ?? "This session has ended.");
         await cleanupConnection();
@@ -250,6 +246,111 @@ export function VoiceConsole() {
         setIsAgentSpeaking(true);
         void audioRef.current.play().catch(() => setIsAgentSpeaking(false));
       }
+    },
+    [appendEntry, cleanupConnection],
+  );
+
+  async function handleSubmitTranscript(event: React.FormEvent) {
+    event.preventDefault();
+    const text = draft.trim();
+    if (!text || !session) {
+      return;
+    }
+    setDraft("");
+    await interruptIfAgentSpeaking(session);
+    appendEntry("student", text);
+
+    try {
+      const response = await voiceApi.postEvent(apiClient, session.session_id, {
+        event_type: "final_transcript",
+        text,
+      });
+      await applyEventResponse(response.data);
+    } catch (eventError) {
+      setErrorMessage(eventError instanceof ApiError ? eventError.message : "Could not reach the voice agent.");
+      setStatus("error");
+    }
+  }
+
+  // Free Local Demo Mode (Task 023): a simple, reliable "hold to talk"
+  // path that needs no LiveKit/realtime transport at all - it records a
+  // short clip with the browser's own MediaRecorder (the same
+  // getUserMedia stream already granted in handleStart, which the
+  // LiveKit branch stops but the mock/local branch leaves running), then
+  // sends it to the *existing* final_transcript event endpoint exactly
+  // like the typed-text composer below does, just with audio_base64
+  // instead of text. The backend runs server-side STT (local Whisper in
+  // free mode, or any other STT_PROVIDER) before handing the recognized
+  // text to the same VoiceSessionService/AgentOrchestrator path - no
+  // transport, session, or orchestrator code changes needed for this.
+  function startRecording() {
+    const stream = micStreamRef.current;
+    if (!stream || !session || isRecording) {
+      return;
+    }
+    recordedChunksRef.current = [];
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream);
+    } catch {
+      setErrorMessage("This browser cannot record audio for the local voice demo.");
+      return;
+    }
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        recordedChunksRef.current.push(event.data);
+      }
+    };
+    recorder.start();
+    mediaRecorderRef.current = recorder;
+    setIsRecording(true);
+  }
+
+  async function stopRecordingAndSend() {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || !session) {
+      setIsRecording(false);
+      return;
+    }
+    const stopped = new Promise<void>((resolve) => {
+      recorder.addEventListener("stop", () => resolve(), { once: true });
+    });
+    recorder.stop();
+    await stopped;
+    mediaRecorderRef.current = null;
+    setIsRecording(false);
+
+    const chunks = recordedChunksRef.current;
+    recordedChunksRef.current = [];
+    const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+    if (blob.size === 0) {
+      return;
+    }
+
+    await interruptIfAgentSpeaking(session);
+    appendEntry("student", "(voice message - transcribing...)");
+
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const response = await voiceApi.postEvent(apiClient, session.session_id, {
+        event_type: "final_transcript",
+        audio_base64: arrayBufferToBase64(arrayBuffer),
+      });
+      const body = response.data;
+      // Replace the placeholder now that we know what was actually
+      // recognized (the browser has no transcript of its own - STT ran
+      // entirely server-side).
+      setTranscript((current) => {
+        const next = [...current];
+        for (let i = next.length - 1; i >= 0; i -= 1) {
+          if (next[i].speaker === "student" && next[i].text === "(voice message - transcribing...)") {
+            next[i] = { ...next[i], text: body.recognized_text || "(could not transcribe audio)" };
+            break;
+          }
+        }
+        return next;
+      });
+      await applyEventResponse(body);
     } catch (eventError) {
       setErrorMessage(eventError instanceof ApiError ? eventError.message : "Could not reach the voice agent.");
       setStatus("error");
@@ -293,7 +394,7 @@ export function VoiceConsole() {
         <Notice tone={mode === "livekit" ? "info" : "warning"}>
           {mode === "livekit"
             ? "This session is using the real LiveKit realtime transport."
-            : "This session is using the mock voice transport - no real audio provider is connected in this environment."}
+            : "This session has no realtime transport connected - hold the mic button to record and send a clip, or type a message. Whichever STT/TTS/LLM providers are configured on the backend (local free-demo or cloud) process it the same way."}
         </Notice>
       ) : null}
 
@@ -364,15 +465,30 @@ export function VoiceConsole() {
                 transcript above updates automatically as the conversation progresses.
               </Notice>
             ) : (
-              <form className="voice-console__composer" onSubmit={(event) => void handleSubmitTranscript(event)}>
-                <TextInput
-                  aria-label="Transcript input"
-                  onChange={(event) => setDraft(event.target.value)}
-                  placeholder="Type a student message to simulate speech"
-                  value={draft}
-                />
-                <Button type="submit">Send</Button>
-              </form>
+              <div className="voice-console__local-controls">
+                <Button
+                  disabled={isAgentSpeaking && !isRecording}
+                  icon={<Mic size={16} aria-hidden="true" />}
+                  onMouseDown={startRecording}
+                  onMouseLeave={() => void (isRecording && stopRecordingAndSend())}
+                  onMouseUp={() => void stopRecordingAndSend()}
+                  onTouchEnd={() => void stopRecordingAndSend()}
+                  onTouchStart={startRecording}
+                  type="button"
+                  variant={isRecording ? "danger" : "primary"}
+                >
+                  {isRecording ? "Recording… release to send" : "Hold to talk"}
+                </Button>
+                <form className="voice-console__composer" onSubmit={(event) => void handleSubmitTranscript(event)}>
+                  <TextInput
+                    aria-label="Transcript input"
+                    onChange={(event) => setDraft(event.target.value)}
+                    placeholder="Or type a student message to simulate speech"
+                    value={draft}
+                  />
+                  <Button type="submit">Send</Button>
+                </form>
+              </div>
             )}
 
             <Button icon={<PhoneOff size={16} aria-hidden="true" />} onClick={() => void handleEnd()} variant="danger">

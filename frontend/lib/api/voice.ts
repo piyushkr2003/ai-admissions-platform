@@ -33,7 +33,7 @@ export const voiceApi = {
   postEvent(
     client: ApiClient,
     sessionId: string,
-    event: { event_type: VoiceEventType; text?: string; event_id?: string },
+    event: { event_type: VoiceEventType; text?: string; audio_base64?: string; event_id?: string },
   ) {
     return client.post<VoiceEventResponse>(`/voice/sessions/${sessionId}/events`, event);
   },

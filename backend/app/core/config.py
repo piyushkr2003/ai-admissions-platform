@@ -70,6 +70,25 @@ class Settings(BaseSettings):
     gemini_tts_voice: str = "Kore"
     gemini_voice_timeout_seconds: float = 8.0
 
+    # Local/free providers (Task 023) - selected via the existing
+    # STT_PROVIDER=local / TTS_PROVIDER=local / AGENT_LLM_PROVIDER=local
+    # settings below (same pattern as "mock"/"gemini" - no separate
+    # AI_MODE master switch, to avoid a second, potentially-inconsistent
+    # source of truth on top of these three). None of these require any
+    # API key - they call a local process/server the developer runs
+    # themselves (see docs/development.md's "Local Free Demo Mode").
+    whisper_model_size: str = "base"  # tiny|base|small|medium|large-v3 (faster-whisper)
+    whisper_device: str = "cpu"  # "cpu" or "cuda" if a GPU + CUDA/cuDNN is available
+    whisper_compute_type: str = "int8"  # int8 is fastest/lightest on CPU
+
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.2:3b"
+    ollama_timeout_seconds: float = 30.0  # local generation is slower than a cloud API
+
+    piper_command: str = "piper"  # executable name (on PATH) or a full path
+    piper_model_path: str = ""  # path to a downloaded .onnx voice model
+    piper_timeout_seconds: float = 30.0
+
     # Future providers
     stt_api_key: str = ""
     tts_api_key: str = ""
@@ -146,6 +165,12 @@ class Settings(BaseSettings):
             problems.append("GOOGLE_API_KEY must be set in production when STT_PROVIDER=gemini")
         if self.tts_provider.lower() == "gemini" and not self.google_api_key:
             problems.append("GOOGLE_API_KEY must be set in production when TTS_PROVIDER=gemini")
+        if self.stt_provider.lower() == "local":
+            problems.append("STT_PROVIDER=local is a free local-demo provider and must not be used in production")
+        if self.tts_provider.lower() == "local":
+            problems.append("TTS_PROVIDER=local is a free local-demo provider and must not be used in production")
+        if self.agent_llm_provider.lower() == "local":
+            problems.append("AGENT_LLM_PROVIDER=local is a free local-demo provider and must not be used in production")
         if problems:
             raise RuntimeError(
                 "Invalid production configuration: " + "; ".join(problems)

@@ -5,6 +5,7 @@ Uses only the deterministic mock providers (app/voice/providers/mock.py)
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -25,8 +26,9 @@ from app.models.counseling import Appointment
 from app.models.leads import Lead
 from app.models.support import SupportTicket
 from app.models.voice import VoiceSession
-from app.services.voice import VoiceSessionService
+from app.services.voice import VoiceSessionService, _playable_audio_url
 from app.voice import state_machine
+from app.voice.providers.base import TTSResult
 from app.voice.providers.factory import get_stt_provider, get_telephony_provider, get_tts_provider
 from app.voice.providers.mock import MockSTTProvider, MockTTSProvider
 
@@ -78,6 +80,30 @@ def test_mock_stt_empty_audio_returns_empty_result():
     result = MockSTTProvider().recognize(b"", language="en")
     assert result.text == ""
     assert result.confidence == 0.0
+
+
+def test_playable_audio_url_prefers_a_real_provider_url_when_present():
+    # Mock's "mock://tts/..." reference must pass through unchanged - the
+    # frontend intentionally treats it as non-playable (a synthetic tone,
+    # not real speech), so it must never be silently replaced.
+    result = TTSResult(audio_url="mock://tts/abc123", audio_bytes=b"RIFF....", duration_ms=500)
+    assert _playable_audio_url(result) == "mock://tts/abc123"
+
+
+def test_playable_audio_url_builds_a_data_uri_from_real_audio_bytes():
+    # A real provider (Gemini, or Task 023's local Whisper/Ollama/Piper
+    # stack) returns audio_url=None alongside real bytes - this is what
+    # makes that audio playable through the existing REST event response
+    # with zero LiveKit/transport changes.
+    result = TTSResult(audio_url=None, audio_bytes=b"RIFF-fake-wav-bytes", duration_ms=500)
+    url = _playable_audio_url(result)
+    assert url.startswith("data:audio/wav;base64,")
+    assert base64.b64decode(url.removeprefix("data:audio/wav;base64,")) == b"RIFF-fake-wav-bytes"
+
+
+def test_playable_audio_url_is_none_when_no_url_and_no_bytes():
+    result = TTSResult(audio_url=None, audio_bytes=None, duration_ms=0)
+    assert _playable_audio_url(result) is None
 
 
 def test_mock_tts_synthesizes_with_positive_duration():
@@ -214,6 +240,43 @@ def test_final_transcript_invokes_agent_and_persists_transcript(client, db):
     ).scalars().all()
     # greeting (ai) + student utterance + ai response
     assert [m.sender_type for m in messages] == ["ai", "student", "ai"]
+
+
+def test_final_transcript_with_audio_base64_runs_server_side_stt_first(client, db):
+    """Task 023 - the web channel now accepts audio_base64 exactly like
+    the phone webhook already does, so a browser recording (local mode)
+    can drive the same final_transcript path a real STT callback would,
+    with no VoiceSessionService/AgentOrchestrator change."""
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    data = _create_web_session(client, str(nova.id))
+    session_id = data["session_id"]
+
+    audio_base64 = base64.b64encode("Tell me about B.Tech CSE.".encode("utf-8")).decode("ascii")
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session_id}/events",
+        json={"event_type": "final_transcript", "audio_base64": audio_base64},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+    assert "get_course_details" in body["tools_used"]
+    assert body["response_text"]
+
+
+def test_final_transcript_rejects_invalid_audio_base64(client, db):
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    data = _create_web_session(client, str(nova.id))
+    session_id = data["session_id"]
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{session_id}/events",
+        json={"event_type": "final_transcript", "audio_base64": "not-valid-base64!!!"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
 def test_partial_transcript_does_not_invoke_agent(client, db):

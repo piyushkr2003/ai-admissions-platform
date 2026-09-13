@@ -1304,3 +1304,9 @@ ul.stack-tight {
 .voice-console__composer .form-input {
   flex: 1;
 }
+
+.voice-console__local-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}

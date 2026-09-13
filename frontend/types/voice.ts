@@ -66,6 +66,10 @@ export type VoiceEventResponse = {
   turn_state?: string;
   interrupted?: boolean;
   response_text?: string;
+  /** Only present when the event was sent as audio_base64 (Task 023 -
+   * Local Free Demo Mode) - the caller has no other way to know what
+   * server-side STT actually recognized from the recording. */
+  recognized_text?: string;
   audio_url?: string | null;
   audio_duration_ms?: number;
   tts_error?: string | null;

@@ -34,6 +34,13 @@ def get_stt_provider() -> STTProvider:
             base_url=settings.gemini_api_base_url, timeout_seconds=settings.gemini_voice_timeout_seconds,
             sample_rate=settings.voice_worker_sample_rate, num_channels=settings.voice_worker_channels,
         )
+    if name == "local":
+        from app.voice.providers.local import LocalWhisperSTTProvider
+
+        return LocalWhisperSTTProvider(
+            model_size=settings.whisper_model_size, device=settings.whisper_device,
+            compute_type=settings.whisper_compute_type,
+        )
     if not settings.stt_api_key:
         raise ResourceUnavailableError(f"STT provider '{name}' is selected but no STT_API_KEY is configured.")
     raise ResourceUnavailableError(f"STT provider '{name}' has no adapter implemented yet.")
@@ -53,6 +60,18 @@ def get_tts_provider() -> TTSProvider:
             api_key=settings.google_api_key, model=settings.gemini_tts_model,
             base_url=settings.gemini_api_base_url, timeout_seconds=settings.gemini_voice_timeout_seconds,
             voice_name=settings.gemini_tts_voice,
+        )
+    if name == "local":
+        if not settings.piper_model_path:
+            raise ResourceUnavailableError(
+                "TTS provider 'local' is selected but PIPER_MODEL_PATH is not configured "
+                "(path to a downloaded Piper .onnx voice model)."
+            )
+        from app.voice.providers.local import LocalPiperTTSProvider
+
+        return LocalPiperTTSProvider(
+            command=settings.piper_command, model_path=settings.piper_model_path,
+            timeout_seconds=settings.piper_timeout_seconds,
         )
     if not settings.tts_api_key:
         raise ResourceUnavailableError(f"TTS provider '{name}' is selected but no TTS_API_KEY is configured.")

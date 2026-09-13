@@ -2795,3 +2795,101 @@ It reads the key only from the local environment/.env, never accepts it as an ar
 
 `tests/test_voice_gemini.py` covers, with zero real network calls (`urllib.request.urlopen` monkeypatched throughout, exactly like `tests/test_llm_provider.py`'s Gemini LLM coverage): STT/TTS request construction (URL, headers, audio encoding/mime type, voice/model configurability), response parsing, timeout/HTTP-error/malformed-response/no-candidates handling, empty/invalid-audio safety (no request is sent for empty audio; unwrappable raw audio fails safe), language-hint handling for `en`/`hi`/`hinglish`, provider-factory selection and fail-closed behavior for both STT and TTS, production fail-closed validation, no-API-key-logging, and a full realtime-worker turn (audio -> STT -> `AgentOrchestrator` -> TTS -> LiveKit-style publish) with both Gemini adapters selected. The pre-existing `tests/test_voice.py`, `tests/test_voice_worker.py`, and `tests/test_voice_livekit.py` suites are unchanged and continue to pass unmodified, confirming the default mock-provider path is unaffected.
 
+## Local Free Demo Mode (Task 023)
+
+See docs/voice.md section 75 for the full architecture and what was/wasn't live-tested. This mode needs **no API key at all** and **no LiveKit account** - only three local programs the developer installs and runs themselves.
+
+### 1. Install Ollama
+
+Download and install from https://ollama.com (native Windows/Mac/Linux installers). Verify it's running:
+
+```bash
+ollama --version
+```
+
+### 2. Pull the local model
+
+```bash
+ollama pull llama3.2:3b
+```
+
+`llama3.2:3b` (~2GB) was chosen as the default because it runs acceptably on a CPU-only laptop with 8GB+ RAM and is more than capable for this platform's narrow use of the LLM - it is **never** the source of admissions facts (see docs/voice.md section 73.3); it only phrases the occasional genuinely open-ended reply. Any other Ollama model works too - set `OLLAMA_MODEL` to whatever you pulled.
+
+### 3. Install local Whisper (STT)
+
+```bash
+cd backend
+pip install faster-whisper
+```
+
+No separate model download step is required - `faster-whisper` downloads the selected model (`WHISPER_MODEL_SIZE`, default `base`, ~74MB) automatically on first use and caches it locally. No C++ build toolchain is needed on Windows (unlike whisper.cpp, which requires compiling from source) - faster-whisper ships prebuilt wheels.
+
+### 4. Install local TTS (Piper)
+
+1. Download a Piper release for your platform from https://github.com/rhasspy/piper/releases (a single executable, e.g. `piper.exe` on Windows).
+2. Download a voice model, e.g. `en_US-lessac-medium` (both the `.onnx` file and its `.onnx.json` config) from https://github.com/rhasspy/piper/blob/master/VOICES.md.
+3. Either put `piper.exe` on your `PATH`, or note its full path for `PIPER_COMMAND` below.
+
+Piper was chosen over Kokoro specifically for Windows developer laptops: Kokoro's phonemizer dependency (`espeak-ng`) has meaningfully worse Windows packaging, while Piper ships one prebuilt executable per platform with no separate runtime dependency.
+
+### 5. Configure `backend/.env` for local mode
+
+```text
+STT_PROVIDER=local
+TTS_PROVIDER=local
+AGENT_LLM_PROVIDER=local
+# VOICE_TRANSPORT_PROVIDER stays "mock" - no LiveKit account needed for the free demo.
+
+WHISPER_MODEL_SIZE=base          # tiny|base|small|medium|large-v3 - larger = more accurate, slower
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE_TYPE=int8
+
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.2:3b
+
+PIPER_COMMAND=piper              # or the full path to piper.exe if not on PATH
+PIPER_MODEL_PATH=C:\path\to\en_US-lessac-medium.onnx
+```
+
+No secrets are involved - none of these settings are API keys, and nothing here should ever be committed as sensitive.
+
+### 6. Start PostgreSQL/pgvector
+
+```bash
+docker run -p 5432:5432 -e POSTGRES_USER=admissions -e POSTGRES_PASSWORD=admissions -e POSTGRES_DB=admissions pgvector/pgvector:pg16
+```
+
+(Reuse an existing container if you already have one running - see the Task 016 addendum above for the full local-services list.)
+
+### 7. Start the backend
+
+```bash
+cd backend
+uvicorn app.main:app --reload
+```
+
+No realtime voice worker process is needed for local mode - it's only relevant when `VOICE_TRANSPORT_PROVIDER=livekit`.
+
+### 8. Start the frontend
+
+```bash
+cd frontend
+npm run dev
+```
+
+### 9. Test the Nova Institute demo
+
+1. Log in as the seeded Nova admin (`backend/app/db/seed.py` - see the credentials there; never commit real passwords).
+2. Open `/dashboard/voice/console`. The session banner will say "no realtime transport connected" (transport is still `mock` - that's expected and correct for local mode).
+3. Hold the **"Hold to talk"** button, ask something like *"What is the fee for B.Tech CSE?"*, and release. The clip is sent to the backend, transcribed by local Whisper, answered by the same deterministic `get_fee_structure` tool every other mode uses (not the LLM - see docs/voice.md section 75.5), and spoken back by local Piper through the page's `<audio>` element.
+4. Try eligibility ("Am I eligible with 82%?"), scholarships, counselor availability, and "Can I talk to someone?" - all resolve through the existing tools/RAG exactly as in cloud mode.
+5. To test knowledge upload end-to-end: use the existing `POST /api/v1/knowledge/sources` endpoint (Knowledge Base page in the dashboard) to upload a PDF/CSV/FAQ for a college, then ask the voice agent a question that requires that document - RAG retrieval is provider-independent and works identically in local mode.
+
+### Switching back to cloud mode
+
+Set `STT_PROVIDER`/`TTS_PROVIDER`/`AGENT_LLM_PROVIDER` back to `gemini` (and `GOOGLE_API_KEY`) at any time - nothing about local mode changes or removes the existing Gemini/LiveKit code paths; they are selected by the exact same settings.
+
+### Testing
+
+`tests/test_voice_local_providers.py` covers, with no real Whisper model download, Ollama server, or Piper binary invoked anywhere: `faster-whisper`'s genuine `ImportError` fail-closed path (the package is not installed in the CI/dev environment this was verified in), empty-audio safety, Piper subprocess request construction/response parsing/timeout/non-zero-exit handling (`subprocess.run` monkeypatched), Piper executable-missing fail-closed behavior at construction time, Ollama request construction/response parsing/connection-refused/missing-model/malformed-response handling (`urllib.request.urlopen` monkeypatched), provider-factory selection for STT/TTS/LLM=`local` with no API key configured, TTS factory fail-closed when `PIPER_MODEL_PATH` is unset, and that `Settings.validate_for_production()` rejects all three `local` selections. `tests/test_voice.py` additionally covers the new `audio_base64` web-event input path (server-side STT via the existing mock provider) and the new `_playable_audio_url` data-URI helper (mock's non-playable reference is left untouched; a real provider's bytes become a playable `data:` URI). All pre-existing voice/orchestrator/RAG/tenant-isolation/tool test suites pass unmodified.
+
