@@ -2744,3 +2744,54 @@ With the backend running and Nova bootstrapped, drive the same conversation `tes
 
 `tests/test_nova_demo.py` covers: bootstrap on an empty database and idempotent rerun, upserting an already-seeded legacy Nova row without duplication, `--reset` re-ingestion without duplicating chunks, structured field mapping (fees/eligibility/scholarships/dates/documents/counselors/availability), RAG ingestion and Nova-scoped retrieval, tenant isolation across structured data/RAG/counselor availability/the agent, direct agent-tool calls proving structured facts come from the database (not an LLM), and the full demo conversation end to end through the real `AgentOrchestrator` (course -> eligibility -> fee -> scholarship -> counselor -> booking -> lead -> application draft).
 
+## Real Gemini STT + TTS (Task 017 Addendum)
+
+See docs/voice.md section 74 for the full architecture and what was/wasn't live-tested.
+
+### Environment variables
+
+```text
+# STT/TTS provider selection (existing Task 011 settings - "mock" is the
+# default and requires no credentials; set either to "gemini" to use the
+# real adapter added in Task 017)
+STT_PROVIDER=mock                       # "mock" or "gemini"
+TTS_PROVIDER=mock                       # "mock" or "gemini"
+
+# Gemini STT/TTS configuration - GOOGLE_API_KEY and GEMINI_API_BASE_URL
+# are shared with AGENT_LLM_PROVIDER=gemini (Task 016); no separate key is needed.
+GOOGLE_API_KEY=                         # required if STT_PROVIDER or TTS_PROVIDER is "gemini"
+GEMINI_API_BASE_URL=https://generativelanguage.googleapis.com
+GEMINI_STT_MODEL=gemini-2.5-flash
+GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
+GEMINI_TTS_VOICE=Kore
+GEMINI_VOICE_TIMEOUT_SECONDS=8.0
+```
+
+Selecting `STT_PROVIDER=gemini` or `TTS_PROVIDER=gemini` without `GOOGLE_API_KEY` configured raises `RESOURCE_UNAVAILABLE` the moment that provider is actually used, and fails application startup outright when `APP_ENV=production` - the same fail-closed pattern as every other provider (LiveKit, Anthropic, Gemini LLM). `GOOGLE_API_KEY` is sent only in the `x-goog-api-key` request header and is never logged.
+
+### Local development
+
+With the default `STT_PROVIDER=mock` / `TTS_PROVIDER=mock`, nothing changes from Task 011/016 - no Google credentials are needed to exercise the full voice session/worker lifecycle.
+
+To use the real Gemini adapters:
+
+1. Set `GOOGLE_API_KEY`, and set `STT_PROVIDER=gemini` and/or `TTS_PROVIDER=gemini` (they can be set independently - e.g. real TTS with mock STT for a quick manual check).
+2. Restart the backend (and the realtime voice worker, `python -m app.voice.worker.run`, if `VOICE_TRANSPORT_PROVIDER=livekit`).
+3. Drive a conversation exactly as documented in the Task 011/016 addenda above - `VoiceSessionService` and `RealtimeVoiceWorker` call whichever provider the factory returns; no other code path changes.
+
+### Running the optional real-API smoke test
+
+`scripts/smoke_test_gemini_voice.py` is a manual, non-pytest script that exercises the real Gemini API end to end (synthesizes a short sentence with `GeminiTTSProvider`, then transcribes that audio back with `GeminiSTTProvider`) when you have a real `GOOGLE_API_KEY` available:
+
+```bash
+cd backend
+GOOGLE_API_KEY=... python scripts/smoke_test_gemini_voice.py
+# or rely on backend/.env already having GOOGLE_API_KEY set
+```
+
+It reads the key only from the local environment/.env, never accepts it as an argument, never prints it, and prints only non-secret metadata (audio byte sizes, duration, recognized text). It refuses to run at all (exit code 1, no API call) if `GOOGLE_API_KEY` is not set - this is intentional so it can never be mistaken for a passing automated test. It lives under `scripts/`, which is outside `pytest`'s `testpaths` (`pyproject.toml`), so `pytest` never imports it or calls the real API.
+
+### Testing
+
+`tests/test_voice_gemini.py` covers, with zero real network calls (`urllib.request.urlopen` monkeypatched throughout, exactly like `tests/test_llm_provider.py`'s Gemini LLM coverage): STT/TTS request construction (URL, headers, audio encoding/mime type, voice/model configurability), response parsing, timeout/HTTP-error/malformed-response/no-candidates handling, empty/invalid-audio safety (no request is sent for empty audio; unwrappable raw audio fails safe), language-hint handling for `en`/`hi`/`hinglish`, provider-factory selection and fail-closed behavior for both STT and TTS, production fail-closed validation, no-API-key-logging, and a full realtime-worker turn (audio -> STT -> `AgentOrchestrator` -> TTS -> LiveKit-style publish) with both Gemini adapters selected. The pre-existing `tests/test_voice.py`, `tests/test_voice_worker.py`, and `tests/test_voice_livekit.py` suites are unchanged and continue to pass unmodified, confirming the default mock-provider path is unaffected.
+

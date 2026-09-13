@@ -2715,3 +2715,37 @@ The LiveKit room name (`college-{college_id}-voice-{session_id}`, from Task 015'
 - `VoiceSessionService` calls run synchronously on the worker's own asyncio task rather than via `asyncio.to_thread` - fine for one session per worker instance; a design serving many sessions per process should offload this.
 - STT still processes a whole buffered utterance at once (`STTProvider.recognize`), not a true streaming/partial-transcript STT vendor integration - consistent with the interface Task 011 defined.
 
+---
+
+# 74. Task 017 Implementation Status (Addendum) - Real Gemini STT + TTS
+
+Task 016 (section 73.7) left both `STTProvider` and `TTSProvider` unimplemented against a real vendor - only `MockSTTProvider`/`MockTTSProvider` existed. Task 017 adds real adapters for both, backed by the Gemini API, behind the exact same interfaces (`app/voice/providers/base.py`) every other provider already uses. Nothing about `VoiceSessionService`, `AgentOrchestrator`, `RealtimeVoiceWorker`, the LiveKit transport, tool contracts, RAG, leads, appointments, or applications changed - this is strictly two new adapters selected by configuration, per section 4's "provider-agnostic architecture" and section 60's "Voice Provider Abstraction".
+
+## 74.1 What is implemented
+
+- `app/voice/providers/gemini.py`: `GeminiSTTProvider` and `GeminiTTSProvider`, both calling the Gemini `generateContent` REST endpoint directly with `urllib` (no new SDK dependency), mirroring `app/agent/providers/gemini.py`'s existing LLM adapter exactly - `GOOGLE_API_KEY` is sent only in the `x-goog-api-key` header, never the URL, and is never logged.
+- **STT**: `GeminiSTTProvider.recognize(audio_bytes, language=...)` wraps raw PCM16 audio (the shape `RealtimeVoiceWorker` buffers, and what the phone webhook's `audio_base64` decodes to) into a self-describing WAV container (reusing `app/voice/worker/pcm.py::pcm16_to_wav_bytes` - already-tested, no reimplementation) before sending it as Gemini `inlineData`, unless the input is already WAV-encoded (a `RIFF` header), in which case it is passed through unchanged. A language hint (`en`/`hi`/`hinglish`) is appended to the transcription prompt when known, but Gemini is instructed to transcribe verbatim in whatever language/mix was actually spoken - it never translates.
+- **TTS**: `GeminiTTSProvider.synthesize(text, voice_id=...)` requests `responseModalities: ["AUDIO"]` with a configurable `voiceConfig.prebuiltVoiceConfig.voiceName`, decodes the returned base64 raw PCM16 audio, and wraps it into a WAV buffer at whatever sample rate Gemini's response `mimeType` declares (`audio/L16;codec=pcm;rate=...`) - so `TTSResult.audio_bytes` satisfies the exact same "valid WAV, 16-bit PCM" contract `MockTTSProvider` already produced, and `app/voice/worker/pcm.py::wav_bytes_to_pcm16` (used by the worker to publish into LiveKit) needs no changes at all.
+- **Selection**: reuses the existing `STT_PROVIDER` / `TTS_PROVIDER` settings (Task 011) rather than introducing a second, competing provider-name setting - set either to `gemini` to activate the real adapter. `get_stt_provider()`/`get_tts_provider()` (`app/voice/providers/factory.py`) fail closed with `ResourceUnavailableError` if `gemini` is selected without `GOOGLE_API_KEY` configured, exactly like every other provider in this factory; `Settings.validate_for_production()` additionally fails application startup outright under the same condition when `APP_ENV=production`.
+- **Runtime failures** (timeout, network error, HTTP error, malformed response, or a safety-blocked/empty-candidate response) raise `ResourceUnavailableError` - the same abstraction the voice layer already uses for every provider failure (see `app/services/voice.py`'s existing `except ResourceUnavailableError` around `get_tts_provider().synthesize(...)`, and the router/worker's existing handling of STT failures) - no new exception type was introduced. A genuinely empty transcript from a *well-formed* response (Gemini heard silence/no speech) is distinguished from an error: it returns `STTResult(text="")`, which flows into the existing "Sorry, I didn't catch that" path (section 39) rather than raising.
+- **Safety**: empty/zero-length audio is never sent to the API - `recognize()` returns an empty result immediately. Raw audio that cannot be wrapped into a valid WAV also fails safe (empty result) rather than crashing a turn. Empty synthesis text is rejected before any request is made.
+
+## 74.2 Configuration
+
+```text
+STT_PROVIDER=mock                       # "mock" (default) or "gemini"
+TTS_PROVIDER=mock                       # "mock" (default) or "gemini"
+GOOGLE_API_KEY=                         # required if either provider above is "gemini" (shared with AGENT_LLM_PROVIDER=gemini)
+GEMINI_API_BASE_URL=https://generativelanguage.googleapis.com   # shared with the Gemini LLM provider
+GEMINI_STT_MODEL=gemini-2.5-flash
+GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
+GEMINI_TTS_VOICE=Kore
+GEMINI_VOICE_TIMEOUT_SECONDS=8.0
+```
+
+## 74.3 What was NOT live-tested (no real API key available in this environment)
+
+- No real call was made to the Gemini API. `tests/test_voice_gemini.py` monkeypatches `urllib.request.urlopen` throughout - request construction, response parsing, every failure mode, language handling, and a full realtime-worker turn (audio -> STT -> `AgentOrchestrator` -> TTS -> publish) are all verified against a fake network layer.
+- `scripts/smoke_test_gemini_voice.py` is a manual, non-pytest script a developer runs locally with a real `GOOGLE_API_KEY` to confirm the adapters work against the live API (synthesizes a sample sentence, then transcribes it back). It prints only non-secret metadata (byte sizes, duration, recognized text) and refuses to run at all without a real key configured - see docs/development.md's Task 017 addendum for usage.
+- Real-world transcription accuracy for Hindi/Hinglish code-switched speech, real TTS prosody/latency, and Gemini's actual voice-catalog behavior are therefore unverified in this environment; the request/response contract, error handling, and integration with the existing worker/orchestrator are verified.
+

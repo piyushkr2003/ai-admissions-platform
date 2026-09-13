@@ -56,6 +56,16 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     gemini_api_base_url: str = "https://generativelanguage.googleapis.com"
 
+    # Gemini STT/TTS providers (Task 017) - selected via the existing
+    # STT_PROVIDER=gemini / TTS_PROVIDER=gemini settings below (no separate
+    # provider-name setting is introduced - that would create two competing
+    # provider-selection mechanisms). Reuses GOOGLE_API_KEY and
+    # GEMINI_API_BASE_URL already defined above for the Gemini LLM provider.
+    gemini_stt_model: str = "gemini-2.5-flash"
+    gemini_tts_model: str = "gemini-2.5-flash-preview-tts"
+    gemini_tts_voice: str = "Kore"
+    gemini_voice_timeout_seconds: float = 8.0
+
     # Future providers
     stt_api_key: str = ""
     tts_api_key: str = ""
@@ -128,6 +138,10 @@ class Settings(BaseSettings):
             problems.append(
                 f"GOOGLE_API_KEY must be set in production when AGENT_LLM_PROVIDER={self.agent_llm_provider}"
             )
+        if self.stt_provider.lower() == "gemini" and not self.google_api_key:
+            problems.append("GOOGLE_API_KEY must be set in production when STT_PROVIDER=gemini")
+        if self.tts_provider.lower() == "gemini" and not self.google_api_key:
+            problems.append("GOOGLE_API_KEY must be set in production when TTS_PROVIDER=gemini")
         if problems:
             raise RuntimeError(
                 "Invalid production configuration: " + "; ".join(problems)

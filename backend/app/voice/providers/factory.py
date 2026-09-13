@@ -24,6 +24,16 @@ def get_stt_provider() -> STTProvider:
     name = settings.stt_provider.lower()
     if name == "mock":
         return MockSTTProvider()
+    if name == "gemini":
+        if not settings.google_api_key:
+            raise ResourceUnavailableError("STT provider 'gemini' is selected but no GOOGLE_API_KEY is configured.")
+        from app.voice.providers.gemini import GeminiSTTProvider
+
+        return GeminiSTTProvider(
+            api_key=settings.google_api_key, model=settings.gemini_stt_model,
+            base_url=settings.gemini_api_base_url, timeout_seconds=settings.gemini_voice_timeout_seconds,
+            sample_rate=settings.voice_worker_sample_rate, num_channels=settings.voice_worker_channels,
+        )
     if not settings.stt_api_key:
         raise ResourceUnavailableError(f"STT provider '{name}' is selected but no STT_API_KEY is configured.")
     raise ResourceUnavailableError(f"STT provider '{name}' has no adapter implemented yet.")
@@ -34,6 +44,16 @@ def get_tts_provider() -> TTSProvider:
     name = settings.tts_provider.lower()
     if name == "mock":
         return MockTTSProvider()
+    if name == "gemini":
+        if not settings.google_api_key:
+            raise ResourceUnavailableError("TTS provider 'gemini' is selected but no GOOGLE_API_KEY is configured.")
+        from app.voice.providers.gemini import GeminiTTSProvider
+
+        return GeminiTTSProvider(
+            api_key=settings.google_api_key, model=settings.gemini_tts_model,
+            base_url=settings.gemini_api_base_url, timeout_seconds=settings.gemini_voice_timeout_seconds,
+            voice_name=settings.gemini_tts_voice,
+        )
     if not settings.tts_api_key:
         raise ResourceUnavailableError(f"TTS provider '{name}' is selected but no TTS_API_KEY is configured.")
     raise ResourceUnavailableError(f"TTS provider '{name}' has no adapter implemented yet.")
