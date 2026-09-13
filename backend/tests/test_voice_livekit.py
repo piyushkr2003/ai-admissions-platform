@@ -81,12 +81,21 @@ def test_livekit_provider_constructor_rejects_missing_credentials():
 # ---------------------------------------------------------------------------
 
 def _production_settings(**overrides) -> Settings:
+    # Explicit constructor kwargs always win over a developer's local
+    # backend/.env in pydantic-settings' precedence order, so the three
+    # LIVEKIT_* fields must always be passed here (defaulting to "") rather
+    # than left unset - otherwise a real backend/.env would leak live
+    # credentials into this "credentials missing" scenario and make the
+    # fail-closed test non-deterministic across machines.
     base = dict(
         app_env="production",
         app_debug=False,
         jwt_secret_key="a" * 40,
         cors_allowed_origins="https://admissions.example.edu",
         voice_transport_provider="livekit",
+        livekit_url="",
+        livekit_api_key="",
+        livekit_api_secret="",
     )
     base.update(overrides)
     return Settings(**base)
