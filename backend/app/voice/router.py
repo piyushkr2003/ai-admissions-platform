@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -38,10 +40,26 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.voice import VoiceSession
 from app.services.voice import VoiceSessionService
+from app.voice.providers.base import STTResult
 from app.voice.providers.factory import get_stt_provider, get_telephony_provider
 from app.voice.schemas import VoiceEventCreate, VoiceSessionCreate, VoiceSessionEnd
 
+logger = logging.getLogger("app.voice.router")
+
 router = APIRouter(prefix="/voice", tags=["voice"])
+
+
+def _recognize_with_timing(session_id, audio_bytes: bytes, *, language: str | None) -> STTResult:
+    """Latency-audit observability (first optimization pass): the STT
+    call for an audio_base64 event previously ran with no timing recorded
+    anywhere, unlike the agent/TTS latency already logged in
+    app/services/voice.py::_handle_final_transcript. Logs only - the
+    response contract is unchanged."""
+    t0 = time.perf_counter()
+    result = get_stt_provider().recognize(audio_bytes, language=language)
+    stt_latency_ms = int((time.perf_counter() - t0) * 1000)
+    logger.info("voice.stt_latency session_id=%s latency_ms=%s", session_id, stt_latency_ms)
+    return result
 
 
 def _session_out(session: VoiceSession) -> dict:
@@ -125,7 +143,7 @@ def post_event(session_id: uuid.UUID, payload: VoiceEventCreate, db: Session = D
             audio_bytes = base64.b64decode(payload.audio_base64)
         except (ValueError, TypeError) as exc:
             raise ValidationAppError("Invalid audio_base64 payload.") from exc
-        stt_result = get_stt_provider().recognize(audio_bytes, language=session.language)
+        stt_result = _recognize_with_timing(session.id, audio_bytes, language=session.language)
         text = stt_result.text
         recognized_from_audio = True
     else:
@@ -263,7 +281,7 @@ def _process_telephony_webhook(db: Session, provider_name: str, headers: dict, r
                 audio_bytes = base64.b64decode(event.audio_base64)
             except (ValueError, TypeError) as exc:
                 raise ValidationAppError("Invalid audio_base64 payload.") from exc
-            stt_result = get_stt_provider().recognize(audio_bytes, language=event.language or session.language)
+            stt_result = _recognize_with_timing(session.id, audio_bytes, language=event.language or session.language)
             text = stt_result.text
         try:
             result = service.record_event(session, event_type="final_transcript", text=text, event_id=payload.get("event_id"))

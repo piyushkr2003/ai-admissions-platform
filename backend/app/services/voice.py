@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agent.orchestrator import AgentOrchestrator
+from app.agent.providers.factory import voice_llm_timeout
 from app.colleges.context import CollegeContext, get_college_context
 from app.core.config import get_settings
 from app.core.errors import ConflictError, NotFoundError, RateLimitedError, ResourceUnavailableError, ValidationAppError
@@ -423,7 +424,17 @@ class VoiceSessionService:
         orchestrator = AgentOrchestrator(self.db, college)
         t0 = time.perf_counter()
         try:
-            turn_result = orchestrator.handle_message(conversation, text.strip())
+            # voice_llm_timeout(): if AgentOrchestrator's one bounded LLM
+            # call site (_open_ended_reply, reached only for genuinely
+            # open-ended input) happens to fire during this voice turn, it
+            # uses the shorter ollama_voice_timeout_seconds instead of the
+            # general ollama_timeout_seconds - see app/agent/providers/
+            # factory.py. AgentOrchestrator itself is completely unchanged
+            # and unaware of this; a text conversation's identical call
+            # (app/conversations/router.py) never enters this context, so
+            # its timeout is unaffected.
+            with voice_llm_timeout():
+                turn_result = orchestrator.handle_message(conversation, text.strip())
         except Exception:  # noqa: BLE001 - a broken turn must still produce a voice-safe reply
             logger.exception("voice.agent_turn_failed session_id=%s", session.id)
             session.turn_state = state_machine.IDLE

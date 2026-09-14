@@ -15,8 +15,9 @@ import pytest
 
 from app.agent.providers.anthropic import AnthropicLLMProvider
 from app.agent.providers.base import LLMMessage, LLMProviderError
-from app.agent.providers.factory import get_llm_provider
+from app.agent.providers.factory import get_llm_provider, voice_llm_timeout
 from app.agent.providers.gemini import GeminiLLMProvider
+from app.agent.providers.local import OllamaLLMProvider
 from app.agent.providers.mock import MockLLMProvider
 from app.core.config import get_settings
 from app.core.errors import ResourceUnavailableError
@@ -290,6 +291,57 @@ def test_gemini_provider_never_logs_the_api_key(monkeypatch, caplog):
             provider.generate([LLMMessage(role="user", content="hi")])
     logged_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "goog-super-secret" not in logged_text
+
+
+def test_factory_returns_ollama_provider_with_the_general_timeout_by_default(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "local")
+    monkeypatch.setattr(settings, "ollama_timeout_seconds", 30.0)
+    monkeypatch.setattr(settings, "ollama_voice_timeout_seconds", 6.0)
+
+    provider = get_llm_provider()
+
+    assert isinstance(provider, OllamaLLMProvider)
+    assert provider._timeout_seconds == 30.0
+
+
+def test_factory_uses_the_shorter_voice_timeout_inside_voice_llm_timeout(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "local")
+    monkeypatch.setattr(settings, "ollama_timeout_seconds", 30.0)
+    monkeypatch.setattr(settings, "ollama_voice_timeout_seconds", 6.0)
+
+    with voice_llm_timeout():
+        voice_provider = get_llm_provider()
+
+    text_provider = get_llm_provider()
+
+    assert voice_provider._timeout_seconds == 6.0
+    assert text_provider._timeout_seconds == 30.0
+
+
+def test_voice_llm_timeout_reverts_even_if_the_wrapped_call_raises(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "local")
+    monkeypatch.setattr(settings, "ollama_timeout_seconds", 30.0)
+    monkeypatch.setattr(settings, "ollama_voice_timeout_seconds", 6.0)
+
+    with pytest.raises(RuntimeError):
+        with voice_llm_timeout():
+            raise RuntimeError("simulated failure mid-voice-turn")
+
+    provider = get_llm_provider()
+    assert provider._timeout_seconds == 30.0
+
+
+def test_ollama_timeout_raises_llm_provider_error_for_graceful_fallback(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = OllamaLLMProvider(base_url="http://localhost:11434", model="llama3.2:3b", timeout_seconds=6.0)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
 
 
 def test_anthropic_provider_never_logs_the_api_key(monkeypatch, caplog):

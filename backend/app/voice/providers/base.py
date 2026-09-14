@@ -8,6 +8,7 @@ app/voice/providers/factory.py - business logic never changes.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -79,6 +80,20 @@ class TTSProvider(ABC):
         """Best-effort cancellation of in-flight synthesis/playback for
         barge-in - must never raise."""
         raise NotImplementedError
+
+    def synthesize_stream(
+        self, text: str, *, language: str = "en", voice_id: str | None = None,
+    ) -> Iterator[TTSResult]:
+        """Optional, additive capability (second latency-audit pass,
+        "sentence-level early TTS"): yield one or more TTSResult chunks
+        for `text`, with the first chunk ready as soon as possible rather
+        than only after the whole text is synthesized. Not abstract, so
+        every existing provider keeps working unchanged - the default
+        here simply yields the one result synthesize() already produces.
+        A provider that can genuinely produce earlier partial audio (see
+        LocalPiperTTSProvider's override) may do so; no call site is
+        required to use this instead of synthesize()."""
+        yield self.synthesize(text, language=language, voice_id=voice_id)
 
 
 class RealtimeTransportProvider(ABC):

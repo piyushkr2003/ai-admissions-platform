@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 
 import jwt
@@ -30,8 +31,27 @@ from app.models.leads import Lead
 from app.models.voice import VoiceSession
 from app.services.voice import VoiceSessionService
 from app.voice import state_machine
+from app.voice.providers.base import STTResult
 from app.voice.providers.livekit import room_name_for
+from app.voice.providers.mock import MockSTTProvider
 from app.voice.worker.session_worker import RealtimeVoiceWorker
+
+
+@pytest.fixture(autouse=True)
+def _pin_mock_voice_providers(monkeypatch):
+    """Explicit constructor kwargs/monkeypatches always win over a
+    developer's local backend/.env in pydantic-settings' precedence
+    order - pin "mock" for all three provider settings here so every
+    test in this file (including the new non-blocking/latency tests
+    below) never depends on whether a real local Whisper/Ollama/Piper
+    install happens to be configured on this machine (same isolation
+    precedent as _production_settings() in test_voice_local_providers.py
+    and the STT-latency test added to test_voice.py in the first
+    latency-audit pass)."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "stt_provider", "mock")
+    monkeypatch.setattr(settings, "tts_provider", "mock")
+    monkeypatch.setattr(settings, "agent_llm_provider", "mock")
 
 NOVA_SLUG = "nova-institute-of-technology"
 AURORA_SLUG = "aurora-college-of-management"
@@ -334,8 +354,19 @@ def test_barge_in_stops_playback_and_records_interruption(db):
         fake.audio_frames_to_yield = ["What is the fee for B.Tech CSE?".encode("utf-8")]
         await worker._handle_track_subscribed(object(), worker._student_identity)
         stopped_task = asyncio.create_task(worker._handle_speaking_stopped(worker._student_identity))
-        await asyncio.sleep(0.03)  # let STT+orchestrator+TTS run and playback begin
-        assert worker._session.turn_state == state_machine.SPEAKING
+        # STT/orchestrator now run via loop.run_in_executor (second
+        # latency-audit pass) - real OS thread-pool dispatch adds a few
+        # milliseconds of scheduling overhead a fixed sleep can't reliably
+        # outlast, so poll for the state transition instead of guessing a
+        # delay. FakeRoomClient's publish_delay_iterations=20 keeps
+        # playback going far longer than this poll can possibly take, so
+        # barge-in still lands mid-playback exactly as intended.
+        for _ in range(200):
+            if worker._session.turn_state == state_machine.SPEAKING:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("agent never reached the SPEAKING turn_state before timing out")
         await worker._handle_speaking_started(worker._student_identity)  # barge-in
         await stopped_task
 
@@ -495,6 +526,76 @@ def test_worker_never_leaks_another_colleges_knowledge(db):
 # ---------------------------------------------------------------------------
 # No-secret / no-raw-audio logging
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Second latency-audit pass: non-blocking STT/orchestrator + timing logs
+# ---------------------------------------------------------------------------
+
+def test_speaking_started_is_handled_while_stt_runs_in_the_background_thread(db, monkeypatch):
+    """Regression test for this pass's core change: before offloading STT
+    to a thread via loop.run_in_executor, get_stt_provider().recognize()
+    ran directly on the worker's asyncio task with no `await` inside it -
+    a synchronous call like that blocks the *entire* single-threaded
+    event loop for its whole duration, so _handle_speaking_started could
+    not even be scheduled, let alone finish, until STT returned. Proves
+    the fix by making STT artificially slow (a real blocking time.sleep,
+    not an awaited one) and showing _handle_speaking_started still
+    completes almost immediately while that sleep is still in progress."""
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, NOVA_SLUG)
+    session, conversation, context = _make_web_session(db, nova)
+    fake = FakeRoomClient()
+    worker = _bootstrap_worker(db, session, context, fake)
+
+    def slow_recognize(self, audio_bytes, *, language=None):
+        time.sleep(0.3)  # simulates a slow real STT model - a genuine blocking call
+        return STTResult(text="What is the fee for B.Tech CSE?", is_final=True, confidence=0.99, language=language)
+
+    monkeypatch.setattr(MockSTTProvider, "recognize", slow_recognize)
+
+    speaking_started_elapsed = None
+
+    async def scenario():
+        nonlocal speaking_started_elapsed
+        fake.audio_frames_to_yield = [b"anything"]
+        await worker._handle_track_subscribed(object(), worker._student_identity)
+
+        process_task = asyncio.create_task(worker._handle_speaking_stopped(worker._student_identity))
+        await asyncio.sleep(0.05)  # let _process_utterance start and reach the executor await point
+
+        t0 = time.perf_counter()
+        await worker._handle_speaking_started(worker._student_identity)
+        speaking_started_elapsed = time.perf_counter() - t0
+
+        await process_task
+
+    asyncio.run(scenario())
+
+    # If the event loop were still blocked by the 0.3s STT call,
+    # _handle_speaking_started could not have run this quickly.
+    assert speaking_started_elapsed < 0.2
+
+
+def test_worker_logs_stt_and_time_to_first_audio_latency(db, caplog):
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, NOVA_SLUG)
+    session, conversation, context = _make_web_session(db, nova)
+    fake = FakeRoomClient()
+    worker = _bootstrap_worker(db, session, context, fake)
+
+    with caplog.at_level(logging.INFO, logger="app.voice.worker"):
+        asyncio.run(_speak_utterance(worker, fake, "What is the fee for B.Tech CSE?"))
+
+    messages = [r.getMessage() for r in caplog.records]
+    stt_lines = [m for m in messages if "voice.worker_stt_latency" in m]
+    audio_lines = [m for m in messages if "voice.worker_time_to_first_audio" in m]
+    assert len(stt_lines) == 1
+    assert f"session_id={session.id}" in stt_lines[0] and "latency_ms=" in stt_lines[0]
+    assert len(audio_lines) == 1
+    assert f"session_id={session.id}" in audio_lines[0] and "latency_ms=" in audio_lines[0]
+
 
 def test_worker_never_logs_the_livekit_secret(db, monkeypatch, caplog):
     seed_demo_data(db)

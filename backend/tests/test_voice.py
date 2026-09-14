@@ -182,27 +182,64 @@ def test_create_web_session_local_piper_ignores_seeded_bogus_voice_id(client, db
     0xC0000409) instead of just failing to find the file. This proves the
     full create_web_session path now succeeds with TTS_PROVIDER=local
     against this exact real seeded configuration."""
+    import json as json_module
+    import queue as queue_module
     import subprocess as subprocess_module
     import sys as sys_module
+    from pathlib import Path
 
     from app.core.config import get_settings
+    from app.voice.providers import local as local_providers_module
 
     settings = get_settings()
     monkeypatch.setattr(settings, "tts_provider", "local")
     monkeypatch.setattr(settings, "piper_command", sys_module.executable)
     monkeypatch.setattr(settings, "piper_model_path", "en_US-lessac-medium.onnx")
+    monkeypatch.setattr(local_providers_module, "_PIPER_WORKER_CACHE", {})
 
     captured = {}
 
-    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
-        captured["model_arg"] = cmd[cmd.index("--model") + 1]
-        from pathlib import Path
+    class _FakePersistentPiperProcess:
+        """Second latency-audit pass: Piper is now a persistent
+        `--json-input` process (app/voice/providers/local.py's
+        _PersistentPiperWorker), not a fresh subprocess.run() per call -
+        this stands in for that process the same way
+        tests/test_voice_local_providers.py's _FakePiperProcess does."""
 
-        output_index = cmd.index("--output_file") + 1
-        Path(cmd[output_index]).write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
-        return subprocess_module.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
+        def __init__(self, cmd):
+            captured["model_arg"] = cmd[cmd.index("--model") + 1]
+            self.stdin = self
+            self.stdout = self
+            self.stderr = iter(())
+            self._lines: queue_module.Queue = queue_module.Queue()
 
-    monkeypatch.setattr(subprocess_module, "run", fake_run)
+        def write(self, line):
+            request = json_module.loads(line)
+            Path(request["output_file"]).write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
+            self._lines.put(request["output_file"])
+
+        def flush(self):
+            pass
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            line = self._lines.get()
+            if line is None:
+                raise StopIteration
+            return line + "\n"
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            self._lines.put(None)
+
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        return _FakePersistentPiperProcess(cmd)
+
+    monkeypatch.setattr(subprocess_module, "Popen", fake_popen)
 
     seed_demo_data(db)
     db.commit()
@@ -308,6 +345,46 @@ def test_final_transcript_with_audio_base64_runs_server_side_stt_first(client, d
     body = resp.json()["data"]
     assert "get_course_details" in body["tools_used"]
     assert body["response_text"]
+
+
+def test_final_transcript_audio_logs_stt_latency_without_changing_the_response_contract(client, db, caplog, monkeypatch):
+    """Latency-audit observability change: the STT call for an
+    audio_base64 event previously ran with no timing recorded anywhere
+    (unlike agent_latency_ms/tts_latency_ms, already logged by
+    VoiceSessionService). Must be logged, and must NOT become a new
+    field in the public JSON response - only logging/metadata changed."""
+    import logging
+
+    # Explicit constructor kwargs always win over a developer's local
+    # backend/.env in pydantic-settings' precedence order - pin "mock"
+    # here so this test's timing/behavior never depends on whether a
+    # real local Whisper install happens to be configured on this
+    # machine (same isolation precedent as _production_settings() in
+    # tests/test_voice_local_providers.py).
+    monkeypatch.setattr(get_settings(), "stt_provider", "mock")
+
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    data = _create_web_session(client, str(nova.id))
+    session_id = data["session_id"]
+
+    audio_base64 = base64.b64encode("Tell me about B.Tech CSE.".encode("utf-8")).decode("ascii")
+    with caplog.at_level(logging.INFO, logger="app.voice.router"):
+        resp = client.post(
+            f"/api/v1/voice/sessions/{session_id}/events",
+            json={"event_type": "final_transcript", "audio_base64": audio_base64},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["data"]
+
+    assert "stt_latency_ms" not in body  # response contract unchanged
+
+    stt_latency_records = [r for r in caplog.records if "voice.stt_latency" in r.getMessage()]
+    assert len(stt_latency_records) == 1
+    message = stt_latency_records[0].getMessage()
+    assert f"session_id={session_id}" in message
+    assert "latency_ms=" in message
 
 
 def test_create_web_session_with_kannada_locks_conversation_language(client, db):

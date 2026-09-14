@@ -20,18 +20,46 @@ interface (see room_client.py's `VoiceRoomClient`), never on
 fake room - no real LiveKit server is reachable in this environment
 (see tests/test_voice_worker.py).
 
-Known simplification: `VoiceSessionService` calls run synchronously on
-the worker's own asyncio task rather than via `asyncio.to_thread` -
-acceptable because one worker instance only ever drives one session's
-turns sequentially; a deployment running many sessions per worker
-process could move this to a thread without changing this class's
-public behavior.
+Second low-latency optimization pass: STT recognition and the
+VoiceSessionService/AgentOrchestrator turn (`_record_event`) are both
+blocking, synchronous calls. Previously they ran directly on the
+worker's own asyncio task, which fully monopolized the event loop for
+their entire duration (measured: this can be several seconds with a
+cold-ish STT/LLM combination) - during that window `_handle_speaking_started`
+(the barge-in signal) could not even be scheduled, let alone run, no
+matter how it was implemented, because a synchronous call with no
+`await` inside a coroutine blocks the *whole* single-threaded event
+loop, not just the task running it. Both calls now run via
+`loop.run_in_executor(_BLOCKING_CALL_POOL, ...)` - a small, bounded,
+module-level `ThreadPoolExecutor` dedicated to this worker module
+(rather than asyncio's shared default executor, so a burst of voice
+turns can never starve unrelated `asyncio.to_thread` work elsewhere in
+the process) - which frees the event loop to run other callbacks
+(including `_handle_speaking_started`) while the blocking work happens
+on a separate OS thread. One worker instance still only ever has one
+turn in flight at a time (unchanged), so this never spawns more than
+one blocking call per session concurrently.
+
+Freeing the event loop reintroduces a real hazard that strict
+sequential execution used to prevent for free: two different threads
+touching the same SQLAlchemy `Session` (`self._db`) at once (e.g. a
+room-disconnect event racing a still-in-flight turn). `self._db_lock`
+(a plain `threading.Lock`, not an asyncio primitive - one side is a
+background thread) serializes every `self._db`-touching method
+(`_record_event`, `_end`) so this can never happen, at the cost of the
+event loop occasionally blocking briefly if a disconnect/teardown event
+truly races an in-flight turn - a narrow, bounded tradeoff, and a vast
+improvement over blocking on every single turn.
 """
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import threading
+import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -50,6 +78,12 @@ from app.voice.worker.room_client import VoiceRoomClient
 logger = logging.getLogger("app.voice.worker")
 
 _ENDED_STATUSES = ("completed", "failed")
+
+# Bounded, dedicated to this module - see the docstring above. 8 is
+# generous for "one turn in flight per session" workloads without
+# risking unbounded thread growth if many sessions happen to process a
+# turn at the same moment in one worker process.
+_BLOCKING_CALL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="voice-worker-blocking")
 
 
 class RealtimeVoiceWorker:
@@ -74,6 +108,7 @@ class RealtimeVoiceWorker:
         self._utterance_buffer = bytearray()
         self._speaking_task: asyncio.Task | None = None
         self._speaking_stop: asyncio.Event | None = None
+        self._db_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -173,15 +208,34 @@ class RealtimeVoiceWorker:
     # ------------------------------------------------------------------
 
     async def _process_utterance(self, pcm_bytes: bytes) -> None:
+        turn_started = time.perf_counter()
+        loop = asyncio.get_running_loop()
+        stt_provider = get_stt_provider()
+
+        t0 = time.perf_counter()
         try:
-            stt_result = get_stt_provider().recognize(pcm_bytes, language=self._session.language)
+            # run_in_executor (not a direct synchronous call) - see the
+            # module docstring: this is what lets _handle_speaking_started
+            # keep running on the event loop while STT is in flight.
+            stt_result = await loop.run_in_executor(
+                _BLOCKING_CALL_POOL,
+                functools.partial(stt_provider.recognize, pcm_bytes, language=self._session.language),
+            )
         except Exception:  # noqa: BLE001 - an STT failure must not crash the worker
             logger.exception("voice.worker_stt_failed session_id=%s", self.session_id)
             return
+        stt_latency_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info("voice.worker_stt_latency session_id=%s latency_ms=%s", self.session_id, stt_latency_ms)
         if not stt_result.text:
             return
 
-        result = self._record_event("final_transcript", text=stt_result.text)
+        # Same reasoning as the STT call above - VoiceSessionService.record_event
+        # runs AgentOrchestrator (and, inside it, TTS synthesis) synchronously;
+        # offloading it keeps the event loop free for the whole turn, not just
+        # the STT portion.
+        result = await loop.run_in_executor(
+            _BLOCKING_CALL_POOL, functools.partial(self._record_event, "final_transcript", text=stt_result.text),
+        )
         if result is None:
             return
         if result.get("status") in _ENDED_STATUSES:
@@ -190,6 +244,11 @@ class RealtimeVoiceWorker:
 
         audio_bytes = result.get("_tts_audio_bytes")
         if audio_bytes:
+            time_to_first_audio_ms = int((time.perf_counter() - turn_started) * 1000)
+            logger.info(
+                "voice.worker_time_to_first_audio session_id=%s latency_ms=%s",
+                self.session_id, time_to_first_audio_ms,
+            )
             await self._speak(audio_bytes)
 
     async def _speak(self, wav_bytes: bytes) -> None:
@@ -226,23 +285,29 @@ class RealtimeVoiceWorker:
     # ------------------------------------------------------------------
 
     def _record_event(self, event_type: str, *, text: str | None = None) -> dict | None:
-        service = VoiceSessionService(self._db)
-        try:
-            result = service.record_event(self._session, event_type=event_type, text=text)
-        except AppError:
-            self._db.rollback()
-            logger.warning("voice.worker_record_event_failed session_id=%s event_type=%s", self.session_id, event_type)
-            return None
-        self._db.commit()
-        return result
+        # May now run on a background thread (see _process_utterance) or
+        # directly on the event-loop thread (e.g. _handle_participant_disconnected
+        # below) - self._db_lock serializes the two so self._db is never
+        # touched from two threads at once.
+        with self._db_lock:
+            service = VoiceSessionService(self._db)
+            try:
+                result = service.record_event(self._session, event_type=event_type, text=text)
+            except AppError:
+                self._db.rollback()
+                logger.warning("voice.worker_record_event_failed session_id=%s event_type=%s", self.session_id, event_type)
+                return None
+            self._db.commit()
+            return result
 
     def _end(self, *, reason: str) -> None:
-        if self._session is not None and self._db is not None:
-            try:
-                service = VoiceSessionService(self._db)
-                service.end_session(self._session, reason=reason)
-                self._db.commit()
-            except Exception:  # noqa: BLE001 - never let cleanup itself crash the worker
-                self._db.rollback()
-                logger.exception("voice.worker_end_session_failed session_id=%s", self.session_id)
+        with self._db_lock:
+            if self._session is not None and self._db is not None:
+                try:
+                    service = VoiceSessionService(self._db)
+                    service.end_session(self._session, reason=reason)
+                    self._db.commit()
+                except Exception:  # noqa: BLE001 - never let cleanup itself crash the worker
+                    self._db.rollback()
+                    logger.exception("voice.worker_end_session_failed session_id=%s", self.session_id)
         self._done.set()

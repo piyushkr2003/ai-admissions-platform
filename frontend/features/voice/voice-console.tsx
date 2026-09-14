@@ -65,6 +65,15 @@ export function VoiceConsole() {
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [draft, setDraft] = useState("");
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  // Distinguishes "the backend is working on a reply" (STT + agent + TTS,
+  // typically the biggest chunk of a turn's latency per the voice latency
+  // audit) from "Listening" - previously both looked identical, which
+  // made an already-slow turn feel even slower. Only meaningful for the
+  // REST-driven local/mock path (handleSubmitTranscript/
+  // stopRecordingAndSend below) - the LiveKit path's turns are driven
+  // entirely by the realtime worker server-side, with no equivalent
+  // "request in flight" moment on this client to key off.
+  const [isProcessing, setIsProcessing] = useState(false);
   const [endedMessage, setEndedMessage] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
 
@@ -263,6 +272,7 @@ export function VoiceConsole() {
     setDraft("");
     await interruptIfAgentSpeaking(session);
     appendEntry("student", text);
+    setIsProcessing(true);
 
     try {
       const response = await voiceApi.postEvent(apiClient, session.session_id, {
@@ -273,6 +283,8 @@ export function VoiceConsole() {
     } catch (eventError) {
       setErrorMessage(eventError instanceof ApiError ? eventError.message : "Could not reach the voice agent.");
       setStatus("error");
+    } finally {
+      setIsProcessing(false);
     }
   }
 
@@ -333,6 +345,7 @@ export function VoiceConsole() {
 
     await interruptIfAgentSpeaking(session);
     appendEntry("student", "(voice message - transcribing...)");
+    setIsProcessing(true);
 
     try {
       const arrayBuffer = await blob.arrayBuffer();
@@ -358,6 +371,8 @@ export function VoiceConsole() {
     } catch (eventError) {
       setErrorMessage(eventError instanceof ApiError ? eventError.message : "Could not reach the voice agent.");
       setStatus("error");
+    } finally {
+      setIsProcessing(false);
     }
   }
 
@@ -470,7 +485,7 @@ export function VoiceConsole() {
           <div className="voice-console__live">
             <div className="voice-console__status" role="status">
               <RadioTower aria-hidden="true" size={16} />
-              <span>{isAgentSpeaking ? "Agent speaking…" : "Listening"}</span>
+              <span>{isAgentSpeaking ? "Agent speaking…" : isProcessing ? "Agent is thinking…" : "Listening"}</span>
               <span className="voice-console__language-active">{labelForLanguage(session?.language)}</span>
             </div>
 

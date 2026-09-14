@@ -442,6 +442,79 @@ describe("VoiceConsole - conversation and barge-in", () => {
   });
 });
 
+describe("VoiceConsole - processing/thinking state", () => {
+  it("shows 'Agent is thinking…' while a final_transcript request is in flight, and clears it once the reply arrives", async () => {
+    let resolveEvent!: (value: Response) => void;
+    const eventResponsePromise = new Promise<Response>((resolve) => {
+      resolveEvent = resolve;
+    });
+
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/colleges")) {
+        return jsonResponse({ data: [makeCollege()], meta: { request_id: "req_1" } });
+      }
+      if (url.endsWith("/voice/sessions")) {
+        return jsonResponse(
+          {
+            data: {
+              session_id: "sess-1", conversation_id: "conv-1", status: "connecting", language: "en",
+              provider: "mock", server_url: null, connection_token: "tok", connection_expires_at: "2026-01-01T00:00:00Z",
+              ice_servers: [], greeting: mockGreeting(),
+            },
+            meta: { request_id: "req_1" },
+          },
+          201,
+        );
+      }
+      if (url.includes("/events")) {
+        return eventResponsePromise;
+      }
+      throw new Error(`Unexpected request in test: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImpl);
+
+    renderConsole();
+    await clickStart();
+
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+
+    await userEvent.type(await screen.findByLabelText(/transcript input/i), "What is the CSE fee?");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    // The request is still unresolved at this point - the UI must not
+    // still say "Listening" (indistinguishable from before the student
+    // spoke, per the latency audit's UX finding) while it's actually
+    // waiting on STT/agent/TTS.
+    await waitFor(() => expect(screen.getByText(/agent is thinking/i)).toBeInTheDocument());
+    expect(screen.queryByText(/^listening$/i)).not.toBeInTheDocument();
+
+    resolveEvent(
+      jsonResponse({ data: { response_text: "The current tuition fee is 1,50,000." }, meta: { request_id: "req_1" } }),
+    );
+
+    await screen.findByText("The current tuition fee is 1,50,000.");
+    await waitFor(() => expect(screen.queryByText(/agent is thinking/i)).not.toBeInTheDocument());
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+  });
+
+  it("does not show the thinking state while the agent is actively speaking", async () => {
+    mockFetch({
+      events: [
+        { status: 200, body: { data: { response_text: "Here is your answer.", audio_url: "https://cdn.example.com/a.mp3" }, meta: { request_id: "req_1" } } },
+      ],
+    });
+    renderConsole();
+    await clickStart();
+
+    await userEvent.type(await screen.findByLabelText(/transcript input/i), "What is the CSE fee?");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(screen.getByText(/agent speaking/i)).toBeInTheDocument());
+    expect(screen.queryByText(/agent is thinking/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("VoiceConsole - clean termination", () => {
   it("ends the session and shows a termination message when the user ends it", async () => {
     mockFetch({

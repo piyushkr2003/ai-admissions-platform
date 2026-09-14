@@ -84,6 +84,17 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"
     ollama_timeout_seconds: float = 30.0  # local generation is slower than a cloud API
+    # Voice-specific override (latency audit, first optimization pass):
+    # AgentOrchestrator._open_ended_reply's LLM call is only ever reached
+    # for genuinely open-ended input with no matching admissions intent -
+    # never for a grounded fact - and on a voice call, silently waiting
+    # the full ollama_timeout_seconds (30s) for that one fallback phrase
+    # is a much worse experience than a text chat tolerating the same
+    # wait. Applied only while a voice turn's orchestrator call is in
+    # flight (see app/agent/providers/factory.py's context var and
+    # app/services/voice.py::_handle_final_transcript) - text
+    # conversations keep using ollama_timeout_seconds above, unchanged.
+    ollama_voice_timeout_seconds: float = 6.0
 
     piper_command: str = "piper"  # executable name (on PATH) or a full path
     piper_model_path: str = ""  # path to a downloaded .onnx voice model

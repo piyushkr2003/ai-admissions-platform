@@ -15,12 +15,15 @@ paths are exercised deterministically via
 `monkeypatch.setitem(sys.modules, name, None)` (a documented Python
 trick: it makes the next `import name` raise ImportError regardless of
 whether the package is actually installed) rather than relying on real
-absence. subprocess.run and urllib.request.urlopen are monkeypatched
-for Piper and Ollama respectively.
+absence. Piper is exercised via a fake subprocess.Popen standing in for
+its persistent `--json-input` process (see _FakePiperProcess below -
+second latency-audit pass); urllib.request.urlopen is monkeypatched for
+Ollama.
 """
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import sys
 import urllib.error
@@ -76,8 +79,71 @@ def test_local_stt_fails_closed_when_faster_whisper_is_not_installed(monkeypatch
         provider.recognize(b"some audio bytes", language="en")
 
 
+class _FakeWhisperSegment:
+    def __init__(self, text: str):
+        self.text = text
+
+
+class _FakeWhisperModel:
+    """Stands in for a real faster_whisper.WhisperModel - counts how many
+    times it was constructed, deliberately not touching any real model
+    weights, so the warm-cache behavior can be proven deterministically
+    and fast."""
+
+    construct_calls = 0
+
+    def __init__(self, model_size, device, compute_type):
+        _FakeWhisperModel.construct_calls += 1
+        self.model_size = model_size
+
+    def transcribe(self, path, language=None, vad_filter=True):
+        return [_FakeWhisperSegment("hello there")], object()
+
+
+def _install_fake_faster_whisper(monkeypatch) -> None:
+    fake_module = type(sys)("faster_whisper")
+    fake_module.WhisperModel = _FakeWhisperModel
+    monkeypatch.setitem(sys.modules, "faster_whisper", fake_module)
+
+
+def test_local_stt_warm_caches_the_whisper_model_across_provider_instances(monkeypatch):
+    """Regression test for the latency-audit finding: app/voice/providers/
+    factory.py::get_stt_provider() constructs a fresh
+    LocalWhisperSTTProvider on every call, so without a module-level
+    cache the Whisper model was reloaded (measured: ~1s with a warm OS
+    disk cache, up to ~3s cold) on every single utterance. Two separate
+    provider instances for the same (model_size, device, compute_type)
+    must share exactly one loaded model - mirrors
+    test_mms_model_cache_is_reused_without_reimporting_transformers's
+    proof style for the MMS models above."""
+    _FakeWhisperModel.construct_calls = 0
+    _install_fake_faster_whisper(monkeypatch)
+
+    provider1 = LocalWhisperSTTProvider(model_size="base", device="cpu", compute_type="int8")
+    result1 = provider1.recognize(b"fake audio bytes one", language="en")
+
+    provider2 = LocalWhisperSTTProvider(model_size="base", device="cpu", compute_type="int8")
+    result2 = provider2.recognize(b"fake audio bytes two", language="en")
+
+    assert _FakeWhisperModel.construct_calls == 1  # loaded once, reused by the second provider instance
+    assert result1.text == "hello there"
+    assert result2.text == "hello there"
+
+
+def test_local_stt_uses_a_separate_cache_entry_per_model_configuration(monkeypatch):
+    """A different (model_size, device, compute_type) must not reuse a
+    cached model built for a different configuration."""
+    _FakeWhisperModel.construct_calls = 0
+    _install_fake_faster_whisper(monkeypatch)
+
+    LocalWhisperSTTProvider(model_size="base", device="cpu", compute_type="int8").recognize(b"x", language="en")
+    LocalWhisperSTTProvider(model_size="small", device="cpu", compute_type="int8").recognize(b"x", language="en")
+
+    assert _FakeWhisperModel.construct_calls == 2
+
+
 # ---------------------------------------------------------------------------
-# LocalPiperTTSProvider
+# LocalPiperTTSProvider - persistent/warm process (second latency-audit pass)
 # ---------------------------------------------------------------------------
 
 def test_local_tts_constructor_requires_model_path():
@@ -104,103 +170,189 @@ def _make_wav_bytes(frames: int = 8000, rate: int = 16000) -> bytes:
     return buf.getvalue()
 
 
-def test_local_tts_synthesize_writes_to_a_real_temp_file_not_stdout_pipe(monkeypatch, tmp_path):
-    """Defensive hardening (not the Windows crash's actual root cause -
-    see test_local_tts_synthesize_ignores_a_non_file_voice_id below for
-    that): a real, seekable temp file is used for `--output_file` rather
-    than streaming to stdout (`-`) via subprocess.run(capture_output=True),
-    and the subprocess's cwd is pinned to Piper's own directory - both
-    match the invocation shape already proven to work by hand, in case a
-    different Piper build/environment is less tolerant of a piped/
-    non-default-cwd invocation than the one this bug was diagnosed on."""
-    wav_bytes = _make_wav_bytes()
+class _FakePiperProcess:
+    """Stands in for the persistent `--json-input` subprocess.Popen
+    _PersistentPiperWorker spawns. `on_request(text, output_file,
+    stdout_lines)` decides what happens for each stdin line written to
+    it - normally it writes the requested wav bytes to output_file and
+    puts that same path onto the fake stdout queue (mirroring the real
+    binary's completion echo, confirmed by hand - see
+    _PersistentPiperWorker's docstring); it can instead simulate a crash
+    (put None -> ends the stdout iterator) or a hang (do nothing, for the
+    timeout path)."""
+
+    def __init__(self, cmd, on_request):
+        self.cmd = cmd
+        self._on_request = on_request
+        self.stdin = self
+        self.stdout = self
+        self.stderr = iter(())
+        self._lines: queue.Queue = queue.Queue()
+        self._returncode = None
+
+    # stdin-like
+    def write(self, line: str) -> None:
+        request = json.loads(line)
+        self._on_request(request["text"], request["output_file"], self._lines)
+
+    def flush(self) -> None:
+        pass
+
+    # stdout-like (iterable of completion-echo lines)
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self._lines.get()
+        if line is None:
+            raise StopIteration
+        return line + "\n"
+
+    def poll(self):
+        return self._returncode
+
+    def kill(self) -> None:
+        self._returncode = -9
+        self._lines.put(None)
+
+
+def _on_request_writes(wav_bytes: bytes):
+    def _cb(text, output_file, lines):
+        Path(output_file).write_bytes(wav_bytes)
+        lines.put(output_file)
+    return _cb
+
+
+def _on_request_crashes(text, output_file, lines):
+    lines.put(None)  # the process died without producing a completion line
+
+
+def _on_request_hangs(text, output_file, lines):
+    pass  # never responds - exercises the timeout path
+
+
+def _install_fake_piper_popen(monkeypatch, on_request, *, captured: dict | None = None):
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        if captured is not None:
+            captured["cmd"] = cmd
+            captured["cwd"] = cwd
+        return _FakePiperProcess(cmd, on_request)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+
+def test_local_tts_synthesize_spawns_the_persistent_process_in_piper_s_own_directory(monkeypatch):
+    """The subprocess is still started with its cwd pinned to Piper's own
+    directory (so it reliably finds espeak-ng-data/onnxruntime resources
+    beside it) and with `--json-input`, not a per-call `--output_file -`
+    stream-to-stdout invocation."""
     captured = {}
-
-    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
-        captured["cmd"] = cmd
-        captured["input"] = input
-        captured["cwd"] = cwd
-        output_index = cmd.index("--output_file") + 1
-        Path(cmd[output_index]).write_bytes(wav_bytes)
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    _install_fake_piper_popen(monkeypatch, _on_request_writes(_make_wav_bytes()), captured=captured)
     # sys.executable is a real file on disk, satisfying the constructor's
     # existence check without needing a real Piper binary installed.
     provider = LocalPiperTTSProvider(command=sys.executable, model_path="en_US-lessac-medium.onnx", timeout_seconds=10)
 
     result = provider.synthesize("Hello there.", language="en")
 
-    assert captured["cmd"][:3] == [sys.executable, "--model", "en_US-lessac-medium.onnx"]
-    assert captured["cmd"][3] == "--output_file"
-    output_arg = captured["cmd"][4]
-    assert output_arg != "-"  # never stream to stdout - that's the Windows crash cause
-    assert not Path(output_arg).exists()  # the temp file/dir is cleaned up after synthesize() returns
+    assert captured["cmd"] == [sys.executable, "--model", "en_US-lessac-medium.onnx", "--json-input"]
     assert captured["cwd"] == str(Path(sys.executable).resolve().parent)
-    assert captured["input"] == b"Hello there."
-    assert result.audio_bytes == wav_bytes
+    assert result.audio_bytes == _make_wav_bytes()
     assert result.duration_ms == 500  # 8000 frames / 16000 Hz
 
 
+def test_local_tts_synthesize_reuses_the_same_warm_process_across_calls_and_instances(monkeypatch):
+    """Regression test for this pass's core change: app/voice/providers/
+    factory.py::get_tts_provider() constructs a fresh LocalPiperTTSProvider
+    on every call, so without a warm, cached persistent process the
+    Piper binary (and its ONNX model) was spawned/reloaded fresh on every
+    single utterance (measured against the real binary: cold per-call
+    ~1.2-1.3s vs ~0.6s once warm - about half the cost, dominated by
+    voice-model load time). Two provider instances for the same
+    (command, model_path) must share exactly one spawned process."""
+    spawn_calls = []
+
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        spawn_calls.append(cmd)
+        return _FakePiperProcess(cmd, _on_request_writes(_make_wav_bytes()))
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    provider1 = LocalPiperTTSProvider(command=sys.executable, model_path="en_US-lessac-medium.onnx", timeout_seconds=10)
+    result1 = provider1.synthesize("First call.")
+    provider2 = LocalPiperTTSProvider(command=sys.executable, model_path="en_US-lessac-medium.onnx", timeout_seconds=10)
+    result2 = provider2.synthesize("Second call, same warm process.")
+
+    assert len(spawn_calls) == 1  # spawned once, reused by the second provider instance and second call
+    assert result1.audio_bytes is not None
+    assert result2.audio_bytes is not None
+
+
+def test_local_tts_uses_a_separate_warm_process_per_model_configuration(monkeypatch):
+    """A different (command, model_path) must not reuse a process warmed
+    for a different configuration."""
+    spawn_calls = []
+
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        spawn_calls.append(cmd)
+        return _FakePiperProcess(cmd, _on_request_writes(_make_wav_bytes()))
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    LocalPiperTTSProvider(command=sys.executable, model_path="en_US-lessac-medium.onnx", timeout_seconds=10).synthesize("x")
+    LocalPiperTTSProvider(command=sys.executable, model_path="en_US-other-voice.onnx", timeout_seconds=10).synthesize("x")
+
+    assert len(spawn_calls) == 2
+
+
 def test_local_tts_synthesize_ignores_a_non_file_voice_id(monkeypatch):
-    """Root-cause regression test for the reported Windows crash
-    (STATUS_STACK_BUFFER_OVERRUN / 0xC0000409, returncode 3221226505).
+    """Root-cause regression test for the historical Windows crash
+    (STATUS_STACK_BUFFER_OVERRUN / 0xC0000409) this provider fixed before
+    this pass: `voice_id` is a cross-provider concept - for Gemini it's a
+    named voice string (e.g. "Kore") that is never a filesystem path, and
+    a college's seeded AgentConfig.voice_settings sets it that way by
+    default ("nova-assist-default" - see app/db/seed.py). A bogus,
+    non-file voice_id must still be ignored, reusing the default warm
+    process exactly as if no voice_id had been supplied - never spawning
+    a second process for a nonexistent "model"."""
+    spawn_calls = []
 
-    `voice_id` is a cross-provider concept - for Gemini it's a named
-    voice string (e.g. "Kore") that is never a filesystem path, and a
-    college's seeded AgentConfig.voice_settings sets it that way by
-    default ("nova-assist-default" - see app/db/seed.py). The original
-    code forwarded *any* non-empty voice_id straight to Piper as
-    `--model`, so creating a voice session for a normally-configured
-    college made Piper try to load a nonexistent "model" file and abort
-    hard instead of failing cleanly - reproducing exactly the reported
-    crash, and explaining why it only ever showed up through the app
-    (which always resolves some voice_id) and never in a direct,
-    by-hand Piper invocation (which naturally passes none). A bogus,
-    non-file voice_id must be ignored, falling back to the configured
-    PIPER_MODEL_PATH exactly as if none had been supplied."""
-    captured = {}
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        spawn_calls.append(cmd)
+        return _FakePiperProcess(cmd, _on_request_writes(_make_wav_bytes()))
 
-    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
-        captured["cmd"] = cmd
-        output_index = cmd.index("--output_file") + 1
-        Path(cmd[output_index]).write_bytes(_make_wav_bytes())
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     provider = LocalPiperTTSProvider(
         command=sys.executable, model_path="en_US-lessac-medium.onnx", timeout_seconds=10,
     )
 
     result = provider.synthesize("Hi! I'm Nova Assist.", language="en", voice_id="nova-assist-default")
 
-    model_index = captured["cmd"].index("--model") + 1
-    assert captured["cmd"][model_index] == "en_US-lessac-medium.onnx"  # the bogus voice_id was ignored
+    assert len(spawn_calls) == 1
+    assert spawn_calls[0] == [sys.executable, "--model", "en_US-lessac-medium.onnx", "--json-input"]
     assert result.audio_bytes is not None
 
 
 def test_local_tts_synthesize_honors_a_voice_id_that_is_a_real_model_file(monkeypatch, tmp_path):
     """The legitimate use of voice_id - overriding to a different,
-    actually-existing Piper voice model - must still work."""
+    actually-existing Piper voice model - must still work, spawning
+    (and then keeping warm) a separate persistent process for that
+    specific model file."""
     real_model = tmp_path / "en_US-other-voice.onnx"
     real_model.write_bytes(b"not a real onnx file, existence is all that's checked")
-    captured = {}
+    spawn_calls = []
 
-    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
-        captured["cmd"] = cmd
-        output_index = cmd.index("--output_file") + 1
-        Path(cmd[output_index]).write_bytes(_make_wav_bytes())
-        return subprocess.CompletedProcess(cmd, returncode=0, stdout=b"", stderr=b"")
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        spawn_calls.append(cmd)
+        return _FakePiperProcess(cmd, _on_request_writes(_make_wav_bytes()))
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     provider = LocalPiperTTSProvider(
         command=sys.executable, model_path="en_US-lessac-medium.onnx", timeout_seconds=10,
     )
 
     provider.synthesize("Hello", language="en", voice_id=str(real_model))
 
-    model_index = captured["cmd"].index("--model") + 1
-    assert captured["cmd"][model_index] == str(real_model)
+    assert spawn_calls == [[sys.executable, "--model", str(real_model), "--json-input"]]
 
 
 def test_local_tts_synthesize_raises_on_empty_text(monkeypatch):
@@ -209,36 +361,38 @@ def test_local_tts_synthesize_raises_on_empty_text(monkeypatch):
         provider.synthesize("   ")
 
 
-def test_local_tts_synthesize_raises_on_nonzero_exit(monkeypatch):
-    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
-        return subprocess.CompletedProcess(cmd, returncode=1, stdout=b"", stderr=b"model not found")
+def test_local_tts_synthesize_raises_and_recovers_when_the_persistent_process_dies_mid_request(monkeypatch):
+    """Covers what used to be two separate per-call failure modes
+    (nonzero exit / the Windows STATUS_STACK_BUFFER_OVERRUN crash) - with
+    a persistent process there is only one way this surfaces at the
+    synthesize() layer: the whole process dies before echoing a
+    completion line. Must fail closed with a clear error, never hang or
+    raise an unhandled exception - and the *next* call must transparently
+    spawn a fresh process rather than staying wedged forever."""
+    spawn_calls = []
+    processes = []
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        spawn_calls.append(cmd)
+        on_request = _on_request_crashes if len(spawn_calls) == 1 else _on_request_writes(_make_wav_bytes())
+        process = _FakePiperProcess(cmd, on_request)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     provider = LocalPiperTTSProvider(command=sys.executable, model_path="voice.onnx", timeout_seconds=10)
+
     with pytest.raises(ResourceUnavailableError):
         provider.synthesize("Hello")
 
-
-def test_local_tts_synthesize_raises_on_windows_stack_buffer_overrun_crash(monkeypatch):
-    """Reproduces the exact reported evidence: Piper exits with Windows
-    crash code 3221226505 (0xC0000409 / STATUS_STACK_BUFFER_OVERRUN) and
-    writes no output file - the provider must fail closed with a clear
-    error, never hang or raise an unhandled exception."""
-    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
-        return subprocess.CompletedProcess(cmd, returncode=3221226505, stdout=b"", stderr=b"")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    provider = LocalPiperTTSProvider(command=sys.executable, model_path="voice.onnx", timeout_seconds=10)
-    with pytest.raises(ResourceUnavailableError, match="Piper"):
-        provider.synthesize("Hello")
+    result = provider.synthesize("Hello again, after the crash.")
+    assert result.audio_bytes is not None
+    assert len(spawn_calls) == 2  # the dead process was replaced, not reused
 
 
 def test_local_tts_synthesize_raises_on_timeout(monkeypatch):
-    def fake_run(cmd, *, input, capture_output, timeout, check, cwd=None):
-        raise subprocess.TimeoutExpired(cmd, timeout)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    provider = LocalPiperTTSProvider(command=sys.executable, model_path="voice.onnx", timeout_seconds=10)
+    _install_fake_piper_popen(monkeypatch, _on_request_hangs)
+    provider = LocalPiperTTSProvider(command=sys.executable, model_path="voice.onnx", timeout_seconds=0.05)
     with pytest.raises(ResourceUnavailableError):
         provider.synthesize("Hello")
 
@@ -246,6 +400,60 @@ def test_local_tts_synthesize_raises_on_timeout(monkeypatch):
 def test_local_tts_cancel_is_a_best_effort_no_op():
     provider = LocalPiperTTSProvider(command=sys.executable, model_path="voice.onnx", timeout_seconds=10)
     provider.cancel("some-ref")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# LocalPiperTTSProvider.synthesize_stream - sentence-level early TTS
+# ---------------------------------------------------------------------------
+
+def test_split_into_sentences_finds_safe_boundaries():
+    assert local_providers._split_into_sentences("Hello there. How are you? Fine!") == [
+        "Hello there.", "How are you?", "Fine!",
+    ]
+    assert local_providers._split_into_sentences("No terminal punctuation here") == ["No terminal punctuation here"]
+    assert local_providers._split_into_sentences("   ") == []
+
+
+def test_synthesize_stream_yields_one_chunk_per_sentence_from_the_warm_process(monkeypatch):
+    spawn_calls = []
+    request_texts = []
+
+    def _on_request(text, output_file, lines):
+        request_texts.append(text)
+        Path(output_file).write_bytes(_make_wav_bytes())
+        lines.put(output_file)
+
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        spawn_calls.append(cmd)
+        return _FakePiperProcess(cmd, _on_request)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    provider = LocalPiperTTSProvider(command=sys.executable, model_path="en_US-lessac-medium.onnx", timeout_seconds=10)
+
+    chunks = list(provider.synthesize_stream("First sentence. Second sentence. Third one."))
+
+    assert len(chunks) == 3
+    assert all(chunk.audio_bytes is not None for chunk in chunks)
+    assert request_texts == ["First sentence.", "Second sentence.", "Third one."]
+    assert len(spawn_calls) == 1  # the same warm process serves every sentence, not a new one per sentence
+
+
+def test_synthesize_stream_raises_on_empty_text():
+    provider = LocalPiperTTSProvider(command=sys.executable, model_path="voice.onnx", timeout_seconds=10)
+    with pytest.raises(ResourceUnavailableError):
+        list(provider.synthesize_stream("   "))
+
+
+def test_base_tts_provider_synthesize_stream_default_falls_back_to_a_single_synthesize_call():
+    """Every provider that does NOT override synthesize_stream (e.g.
+    Gemini, mock) keeps working unchanged - TTSProvider's own default
+    implementation just wraps the one synthesize() result."""
+    from app.voice.providers.mock import MockTTSProvider
+
+    provider = MockTTSProvider()
+    chunks = list(provider.synthesize_stream("Hello there.", language="en"))
+    assert len(chunks) == 1
+    assert chunks[0].audio_bytes is not None
 
 
 # ---------------------------------------------------------------------------
@@ -286,12 +494,19 @@ def _fake_tokenizer(text, return_tensors=None):
 
 @pytest.fixture(autouse=True)
 def _clear_mms_cache():
-    """The module-level MMS model cache must not leak state between
-    tests - each test that touches it starts from empty and cleans up
-    after itself regardless of pass/fail."""
+    """The module-level MMS/Whisper/Piper warm caches must not leak state
+    between tests - each test that touches any of them starts from empty
+    and cleans up after itself regardless of pass/fail. (Also covers
+    _WHISPER_MODEL_CACHE and _PIPER_WORKER_CACHE, added by the two
+    latency-audit warm-cache passes - kept in this one fixture rather
+    than near-identical extra ones.)"""
     local_providers._MMS_MODEL_CACHE.clear()
+    local_providers._WHISPER_MODEL_CACHE.clear()
+    local_providers._PIPER_WORKER_CACHE.clear()
     yield
     local_providers._MMS_MODEL_CACHE.clear()
+    local_providers._WHISPER_MODEL_CACHE.clear()
+    local_providers._PIPER_WORKER_CACHE.clear()
 
 
 def _multilingual_provider(piper_command: str = sys.executable) -> LocalMultilingualTTSProvider:
@@ -301,33 +516,31 @@ def _multilingual_provider(piper_command: str = sys.executable) -> LocalMultilin
     )
 
 
-def _fake_piper_run_writing_output_file(args, **kwargs):
-    output_index = args.index("--output_file") + 1
-    Path(args[output_index]).write_bytes(_wav_bytes())
-    return subprocess.CompletedProcess(args, returncode=0, stdout=b"", stderr=b"")
+def _install_fake_piper_popen_writing(monkeypatch, wav_bytes: bytes, *, captured: dict | None = None):
+    def fake_popen(cmd, *, stdin, stdout, stderr, text, bufsize, cwd=None):
+        if captured is not None:
+            captured["cmd"] = cmd
+        return _FakePiperProcess(cmd, _on_request_writes(wav_bytes))
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
 
 def test_multilingual_tts_routes_english_to_piper_unchanged(monkeypatch):
     captured = {}
-
-    def fake_run(args, **kwargs):
-        captured["args"] = args
-        return _fake_piper_run_writing_output_file(args, **kwargs)
-
-    monkeypatch.setattr("subprocess.run", fake_run)
+    _install_fake_piper_popen_writing(monkeypatch, _wav_bytes(), captured=captured)
     provider = _multilingual_provider()
 
     result = provider.synthesize("Hello there.", language="en")
 
-    assert captured["args"][0] == sys.executable
-    assert "--model" in captured["args"]
+    assert captured["cmd"][0] == sys.executable
+    assert "--model" in captured["cmd"]
     assert result.audio_bytes is not None
 
 
 def test_multilingual_tts_routes_hinglish_to_piper_unchanged(monkeypatch):
     """No dedicated Hinglish voice model exists - it must fall back to
     the same English Piper path as "en", not silently fail."""
-    monkeypatch.setattr("subprocess.run", _fake_piper_run_writing_output_file)
+    _install_fake_piper_popen_writing(monkeypatch, _wav_bytes())
     provider = _multilingual_provider()
     result = provider.synthesize("CSE ka fee kitna hai?", language="hinglish")
     assert result.audio_bytes is not None
