@@ -13,6 +13,19 @@
 # appends a random suffix if that subdomain is already taken elsewhere).
 # After the first deploy, check both services' actual URLs in the Render
 # dashboard and update these two values if they differ.
+#
+# All three resources below use Render's Free plan (zero cost) for a
+# no-card demo deployment: `free` for the database and both web services.
+# Trade-offs to expect on Free, not fixable from this file alone - a
+# deliberate choice for a zero-cost demo, not a bug:
+#   - Free web services spin down after 15 minutes idle and take ~30-60s
+#     to cold-start on the next request.
+#   - Free Postgres instances on Render are deleted after a limited
+#     retention window (Render enforces this account-wide, independent of
+#     this file) - fine for a demo, not for anything meant to persist.
+#   - Render may still require a card on file at the account level for
+#     abuse-prevention even when every resource's plan is `free` - that is
+#     an account verification step this file cannot control or bypass.
 databases:
   - name: admissions-postgres
     databaseName: admissions
@@ -26,10 +39,12 @@ services:
     runtime: docker
     dockerContext: ./backend
     dockerfilePath: ./backend/Dockerfile
-    plan: starter
+    plan: free
     healthCheckPath: /health
     # Applies pending Alembic migrations before each deploy goes live.
-    preDeployCommand: alembic upgrade head
+    # `python -m alembic` (not the bare `alembic` console script) so this
+    # can't fail with a PATH-related "command not found" - see Dockerfile.
+    preDeployCommand: python -m alembic upgrade head
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -89,7 +104,7 @@ services:
     rootDir: ./frontend
     buildCommand: npm ci && npm run build
     startCommand: npm run start -- -p $PORT
-    plan: starter
+    plan: free
     # "/" 307-redirects to "/dashboard" (confirmed via a local production
     # build/start) - checking "/dashboard" directly avoids depending on
     # whether Render's health checker follows redirects.
