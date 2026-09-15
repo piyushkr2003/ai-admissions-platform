@@ -1,11 +1,18 @@
-# Render Blueprint - backend deployment only (frontend is not deployed by
-# this file). Apply via Render's "New +" -> "Blueprint", pointing at this
-# repo. See app/core/config.py::validate_for_production for the full set
-# of rules this configuration must satisfy.
+# Render Blueprint - backend + frontend. Apply via Render's "New +" ->
+# "Blueprint", pointing at this repo. See
+# app/core/config.py::validate_for_production for the full set of rules
+# the backend service's configuration must satisfy.
 #
 # Secrets (marked `sync: false` below) are NOT set here - add them once in
 # the Render dashboard after the first deploy (Environment tab). Never
 # commit real API keys/secrets to this file.
+#
+# CORS_ALLOWED_ORIGINS and NEXT_PUBLIC_API_BASE_URL below assume Render's
+# default onrender.com subdomain exactly matches each service's `name`
+# (true for a first deploy under a fresh account/repo; Render only
+# appends a random suffix if that subdomain is already taken elsewhere).
+# After the first deploy, check both services' actual URLs in the Render
+# dashboard and update these two values if they differ.
 databases:
   - name: admissions-postgres
     databaseName: admissions
@@ -34,11 +41,10 @@ services:
         value: "false"
       - key: JWT_SECRET_KEY
         generateValue: true
-      # Update to the real deployed frontend origin (comma-separated for
-      # more than one); must not be "*" in production (enforced by
-      # validate_for_production).
+      # Must not be "*" in production (enforced by validate_for_production).
+      # See the header comment above about verifying this predicted URL.
       - key: CORS_ALLOWED_ORIGINS
-        value: https://CHANGE-ME.example.com
+        value: https://admissions-frontend.onrender.com
 
       # STT + LLM: Groq (fast cloud inference) - proven working in this
       # project's own live testing. Requires GROQ_API_KEY, set manually.
@@ -76,3 +82,22 @@ services:
         sync: false
       - key: TWILIO_STREAM_PUBLIC_URL
         sync: false
+
+  - type: web
+    name: admissions-frontend
+    runtime: node
+    rootDir: ./frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start -- -p $PORT
+    plan: starter
+    # "/" 307-redirects to "/dashboard" (confirmed via a local production
+    # build/start) - checking "/dashboard" directly avoids depending on
+    # whether Render's health checker follows redirects.
+    healthCheckPath: /dashboard
+    envVars:
+      # Next.js inlines NEXT_PUBLIC_* values into the client bundle at
+      # build time, so it must already be correct when Render builds this
+      # service - see the header comment above about verifying this
+      # predicted URL against the backend's actual one.
+      - key: NEXT_PUBLIC_API_BASE_URL
+        value: https://admissions-backend.onrender.com/api/v1
