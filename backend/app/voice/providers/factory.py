@@ -41,6 +41,16 @@ def get_stt_provider() -> STTProvider:
             model_size=settings.whisper_model_size, device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
         )
+    if name == "groq":
+        if not settings.groq_api_key:
+            raise ResourceUnavailableError("STT provider 'groq' is selected but no GROQ_API_KEY is configured.")
+        from app.voice.providers.groq import GroqSTTProvider
+
+        return GroqSTTProvider(
+            api_key=settings.groq_api_key, model=settings.groq_stt_model,
+            base_url=settings.groq_api_base_url, timeout_seconds=settings.groq_voice_timeout_seconds,
+            sample_rate=settings.voice_worker_sample_rate, num_channels=settings.voice_worker_channels,
+        )
     if not settings.stt_api_key:
         raise ResourceUnavailableError(f"STT provider '{name}' is selected but no STT_API_KEY is configured.")
     raise ResourceUnavailableError(f"STT provider '{name}' has no adapter implemented yet.")
@@ -109,4 +119,14 @@ def get_telephony_provider() -> TelephonyProvider:
     name = settings.telephony_provider.lower()
     if name == "mock":
         return SharedSecretTelephonyProvider(settings.telephony_webhook_secret)
+    if name == "twilio":
+        # Registered here for interface consistency with every other
+        # provider (docs/voice.md section 60), but the real Twilio call
+        # flow (app/voice/router.py's /twilio/incoming + /twilio/stream)
+        # does not go through this generic telephony_provider switch or
+        # the JSON telephony webhook contract at all - see
+        # app/voice/providers/twilio.py's module docstring for why.
+        from app.voice.providers.twilio import TwilioTelephonyProvider
+
+        return TwilioTelephonyProvider(settings.twilio_auth_token)
     raise ResourceUnavailableError(f"Telephony provider '{name}' has no adapter implemented yet.")

@@ -17,6 +17,7 @@ from app.agent.providers.anthropic import AnthropicLLMProvider
 from app.agent.providers.base import LLMMessage, LLMProviderError
 from app.agent.providers.factory import get_llm_provider, voice_llm_timeout
 from app.agent.providers.gemini import GeminiLLMProvider
+from app.agent.providers.groq import GroqLLMProvider
 from app.agent.providers.local import OllamaLLMProvider
 from app.agent.providers.mock import MockLLMProvider
 from app.core.config import get_settings
@@ -355,3 +356,142 @@ def test_anthropic_provider_never_logs_the_api_key(monkeypatch, caplog):
             provider.generate([LLMMessage(role="user", content="hi")])
     logged_text = "\n".join(record.getMessage() for record in caplog.records)
     assert "sk-super-secret" not in logged_text
+
+
+# ---------------------------------------------------------------------------
+# Groq LLM provider (openai/gpt-oss-20b via Groq's OpenAI-compatible API)
+# ---------------------------------------------------------------------------
+
+def test_factory_fails_closed_when_groq_selected_without_api_key(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "groq")
+    monkeypatch.setattr(settings, "groq_api_key", "")
+    with pytest.raises(ResourceUnavailableError):
+        get_llm_provider()
+
+
+def test_factory_returns_groq_provider_when_configured(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "groq")
+    monkeypatch.setattr(settings, "groq_api_key", "gsk-test-key")
+    provider = get_llm_provider()
+    assert isinstance(provider, GroqLLMProvider)
+
+
+def test_factory_uses_the_shared_llm_timeout_for_groq_even_inside_voice_llm_timeout(monkeypatch):
+    """Groq is a fast cloud API (unlike Ollama's CPU-bound local
+    generation) - it reuses llm_timeout_seconds exactly like Anthropic and
+    Gemini, so entering voice_llm_timeout() (Ollama-only) must not change
+    it."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "agent_llm_provider", "groq")
+    monkeypatch.setattr(settings, "groq_api_key", "gsk-test-key")
+    monkeypatch.setattr(settings, "llm_timeout_seconds", 8.0)
+
+    with voice_llm_timeout():
+        voice_provider = get_llm_provider()
+    text_provider = get_llm_provider()
+
+    assert voice_provider._timeout_seconds == 8.0
+    assert text_provider._timeout_seconds == 8.0
+
+
+def test_groq_provider_constructor_requires_api_key():
+    with pytest.raises(ValueError):
+        GroqLLMProvider(api_key="", model="openai/gpt-oss-20b", base_url="https://api.groq.com", timeout_seconds=5)
+
+
+def test_groq_provider_sends_expected_request_and_parses_response(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _FakeHTTPResponse(
+            {"choices": [{"message": {"role": "assistant", "content": "Sure, happy to help!"}}], "model": "openai/gpt-oss-20b"}
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    provider = GroqLLMProvider(api_key="gsk-secret-value", model="openai/gpt-oss-20b", base_url="https://api.groq.com", timeout_seconds=5)
+    result = provider.generate(
+        [LLMMessage(role="system", content="You are helpful."), LLMMessage(role="user", content="Hi there")],
+        temperature=0.3,
+    )
+
+    assert result.content == "Sure, happy to help!"
+    assert result.model == "openai/gpt-oss-20b"
+    assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
+    assert captured["headers"]["authorization"] == "Bearer gsk-secret-value"
+    assert captured["headers"]["user-agent"] == "ai-admissions-platform/1.0"
+    assert "gsk-secret-value" not in captured["url"]
+    assert captured["body"]["messages"] == [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Hi there"},
+    ]
+    assert captured["body"]["temperature"] == 0.3
+    assert captured["body"]["max_tokens"] == 150  # voice-suitable, concise replies
+    assert captured["timeout"] == 5
+
+
+def test_groq_provider_raises_on_http_error(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqLLMProvider(api_key="gsk-x", model="m", base_url="https://api.groq.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_groq_provider_raises_on_timeout(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqLLMProvider(api_key="gsk-x", model="m", base_url="https://api.groq.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_groq_provider_raises_on_malformed_response(monkeypatch):
+    class _BadResponse(_FakeHTTPResponse):
+        def read(self) -> bytes:
+            return b"not json"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None: _BadResponse({}))
+    provider = GroqLLMProvider(api_key="gsk-x", model="m", base_url="https://api.groq.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_groq_provider_raises_on_empty_choices(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None: _FakeHTTPResponse({"choices": [], "model": "m"}))
+    provider = GroqLLMProvider(api_key="gsk-x", model="m", base_url="https://api.groq.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_groq_provider_raises_on_empty_text_content(monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout=None: _FakeHTTPResponse({"choices": [{"message": {"content": ""}}], "model": "m"}),
+    )
+    provider = GroqLLMProvider(api_key="gsk-x", model="m", base_url="https://api.groq.com", timeout_seconds=5)
+    with pytest.raises(LLMProviderError):
+        provider.generate([LLMMessage(role="user", content="hi")])
+
+
+def test_groq_provider_never_logs_the_api_key(monkeypatch, caplog):
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqLLMProvider(api_key="gsk-super-secret", model="m", base_url="https://api.groq.com", timeout_seconds=5)
+    with caplog.at_level(logging.DEBUG, logger="app.agent.llm"):
+        with pytest.raises(LLMProviderError):
+            provider.generate([LLMMessage(role="user", content="hi")])
+    logged_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "gsk-super-secret" not in logged_text

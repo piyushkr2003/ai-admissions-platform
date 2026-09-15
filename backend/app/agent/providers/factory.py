@@ -80,4 +80,13 @@ def get_llm_provider() -> LLMProvider:
             base_url=settings.ollama_base_url, model=settings.ollama_model,
             timeout_seconds=timeout_seconds,
         )
+    if name == "groq":
+        if not settings.groq_api_key:
+            raise ResourceUnavailableError("LLM provider 'groq' is selected but no GROQ_API_KEY is configured.")
+        from app.agent.providers.groq import GroqLLMProvider
+
+        return GroqLLMProvider(
+            api_key=settings.groq_api_key, model=settings.groq_llm_model,
+            base_url=settings.groq_api_base_url, timeout_seconds=settings.llm_timeout_seconds,
+        )
     raise ResourceUnavailableError(f"LLM provider '{name}' has no adapter implemented yet.")
