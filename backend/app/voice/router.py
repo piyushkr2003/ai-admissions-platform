@@ -27,7 +27,7 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -42,7 +42,9 @@ from app.models.voice import VoiceSession
 from app.services.voice import VoiceSessionService
 from app.voice.providers.base import STTResult
 from app.voice.providers.factory import get_stt_provider, get_telephony_provider
+from app.voice.providers.twilio import generate_twiml, verify_twilio_signature
 from app.voice.schemas import VoiceEventCreate, VoiceSessionCreate, VoiceSessionEnd
+from app.voice.twilio_stream import TwilioStreamSession
 
 logger = logging.getLogger("app.voice.router")
 
@@ -299,3 +301,80 @@ def _process_telephony_webhook(db: Session, provider_name: str, headers: dict, r
         return envelope({"session_id": str(session.id), "status": session.status})
 
     raise ValidationAppError(f"Unknown event_type: {event.event_type}")
+
+
+# ---------------------------------------------------------------------------
+# Twilio - minimum viable phone integration (independent of the generic
+# TELEPHONY_PROVIDER=mock path above, which is untouched by any of this).
+# Real Twilio wire format: TwiML (XML) response to a form-encoded webhook,
+# then a bidirectional Media Streams WebSocket for the rest of the call -
+# see app/voice/providers/twilio.py and app/voice/twilio_stream.py.
+# ---------------------------------------------------------------------------
+
+@router.post("/twilio/incoming")
+async def twilio_incoming(request: Request, db: Session = Depends(get_db)) -> Response:
+    """Twilio's inbound-call webhook. `async def` only so the form body
+    can be read before signature verification (same reasoning as
+    telephony_inbound above) - the DB work after that is offloaded to the
+    threadpool identically."""
+    settings = get_settings()
+    form = await request.form()
+    params = {key: str(value) for key, value in form.items()}
+    signature = request.headers.get("x-twilio-signature") or request.headers.get("X-Twilio-Signature")
+
+    # Fail closed in production, matching every other provider adapter in
+    # this codebase (see SharedSecretTelephonyProvider.verify_webhook).
+    # In development, only enforced once TWILIO_AUTH_TOKEN is actually
+    # configured, so an early demo/ngrok setup isn't blocked before the
+    # token is wired up - see this module's "don't block the demo"
+    # requirement.
+    if settings.is_production or settings.twilio_auth_token:
+        if not verify_twilio_signature(
+            auth_token=settings.twilio_auth_token, url=str(request.url), params=params, signature=signature,
+        ):
+            raise UnauthorizedError("Twilio signature verification failed.")
+
+    call_sid = params.get("CallSid")
+    if not call_sid:
+        raise ValidationAppError("CallSid is required.")
+    from_number = params.get("From")
+    to_number = params.get("To")
+
+    def _create_session() -> None:
+        service = VoiceSessionService(db)
+        try:
+            service.create_phone_session(
+                provider_name="twilio", call_id=call_sid, from_number=from_number, to_number=to_number,
+            )
+        except AppError:
+            db.rollback()
+            raise
+        db.commit()
+
+    await run_in_threadpool(_create_session)
+
+    if not settings.twilio_stream_public_url:
+        raise ValidationAppError(
+            "TWILIO_STREAM_PUBLIC_URL is not configured - cannot tell Twilio where to open the media stream."
+        )
+    twiml = generate_twiml(settings.twilio_stream_public_url)
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.websocket("/twilio/stream")
+async def twilio_stream(websocket: WebSocket) -> None:
+    """Twilio's bidirectional Media Streams WebSocket - one connection
+    per phone call. All connected/start/media/stop handling and the
+    STT -> AgentOrchestrator -> TTS bridge live in TwilioStreamSession
+    (app/voice/twilio_stream.py); this route is a thin transport adapter."""
+    await websocket.accept()
+    stream_session = TwilioStreamSession(send=websocket.send_json)
+    try:
+        while True:
+            message = await websocket.receive_json()
+            await stream_session.handle_message(message)
+    except WebSocketDisconnect:
+        await stream_session.close()
+    except Exception:  # noqa: BLE001 - a crashed stream handler must still close out the call record
+        logger.exception("voice.twilio_stream_route_error")
+        await stream_session.close()
