@@ -32,4 +32,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # container's start command). Applies pending Alembic migrations before
 # the server starts serving traffic; `exec` hands off PID 1 to uvicorn so
 # it still receives SIGTERM directly for a clean shutdown.
-CMD ["sh", "-c", "python -m alembic upgrade head && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "python -m alembic stamp base && python -m alembic upgrade head && exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"]
