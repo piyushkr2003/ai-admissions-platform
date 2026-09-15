@@ -10,6 +10,7 @@ from sqlalchemy import engine_from_config, pool
 sys.path.insert(0, os.getcwd())
 
 from app.core.config import get_settings  # noqa: E402
+from app.db.session import normalize_database_url  # noqa: E402
 from app.models import Base  # noqa: E402
 
 config = context.config
@@ -22,7 +23,8 @@ target_metadata = Base.metadata
 
 def _database_url() -> str:
     # Allow ALEMBIC_DATABASE_URL to override for test-database migrations.
-    return os.environ.get("ALEMBIC_DATABASE_URL") or get_settings().database_url
+    url = os.environ.get("ALEMBIC_DATABASE_URL") or get_settings().database_url
+    return normalize_database_url(url)
 
 
 def run_migrations_offline() -> None:

@@ -1,0 +1,78 @@
+# Render Blueprint - backend deployment only (frontend is not deployed by
+# this file). Apply via Render's "New +" -> "Blueprint", pointing at this
+# repo. See app/core/config.py::validate_for_production for the full set
+# of rules this configuration must satisfy.
+#
+# Secrets (marked `sync: false` below) are NOT set here - add them once in
+# the Render dashboard after the first deploy (Environment tab). Never
+# commit real API keys/secrets to this file.
+databases:
+  - name: admissions-postgres
+    databaseName: admissions
+    user: admissions
+    plan: free
+    postgresMajorVersion: 16
+
+services:
+  - type: web
+    name: admissions-backend
+    runtime: docker
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    # Applies pending Alembic migrations before each deploy goes live.
+    preDeployCommand: alembic upgrade head
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: admissions-postgres
+          property: connectionString
+      - key: APP_ENV
+        value: production
+      - key: APP_DEBUG
+        value: "false"
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      # Update to the real deployed frontend origin (comma-separated for
+      # more than one); must not be "*" in production (enforced by
+      # validate_for_production).
+      - key: CORS_ALLOWED_ORIGINS
+        value: https://CHANGE-ME.example.com
+
+      # STT + LLM: Groq (fast cloud inference) - proven working in this
+      # project's own live testing. Requires GROQ_API_KEY, set manually.
+      - key: STT_PROVIDER
+        value: groq
+      - key: AGENT_LLM_PROVIDER
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false
+
+      # TTS: "local" (Piper/MMS) is a free local-demo provider and is
+      # rejected in production by validate_for_production, and Groq has no
+      # TTS adapter - Gemini is the remaining implemented option. Requires
+      # GOOGLE_API_KEY, set manually (shared with no other provider here).
+      - key: TTS_PROVIDER
+        value: gemini
+      - key: GOOGLE_API_KEY
+        sync: false
+
+      # Browser voice transport stays on the deterministic mock transport
+      # (no LiveKit infrastructure is provisioned by this Blueprint).
+      - key: VOICE_TRANSPORT_PROVIDER
+        value: mock
+      - key: TELEPHONY_PROVIDER
+        value: mock
+
+      # Twilio phone integration (app/voice/providers/twilio.py) is
+      # optional and independent of TELEPHONY_PROVIDER above - set these
+      # manually only if/when a Twilio phone number is wired up.
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: TWILIO_STREAM_PUBLIC_URL
+        sync: false
