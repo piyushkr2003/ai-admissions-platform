@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider, type AuthService } from "@/features/auth/auth-provider";
@@ -529,5 +529,404 @@ describe("VoiceConsole - clean termination", () => {
     await userEvent.click(await screen.findByRole("button", { name: /end session/i }));
 
     expect(await screen.findByText(/ended by admissions staff/i)).toBeInTheDocument();
+  });
+});
+
+describe("VoiceConsole - continuous listening (client-side VAD)", () => {
+  // Fakes MediaRecorder/AudioContext (neither exists in jsdom) so the
+  // continuous-listening loop in voice-console.tsx can be exercised
+  // end-to-end: mic armed automatically on connect -> simulated speech
+  // then ~800ms of simulated silence -> automatic send as audio_base64
+  // -> automatic resume for the next turn once the reply has no audio to
+  // play. This is what beginListeningTurn/sendRecordedClip/simple-vad.ts
+  // actually do in a real browser - only the browser APIs are faked.
+  class FakeMediaRecorder {
+    static instances: FakeMediaRecorder[] = [];
+    state: "inactive" | "recording" = "inactive";
+    mimeType = "audio/webm";
+    ondataavailable: ((event: { data: Blob }) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    private stopListeners: Array<() => void> = [];
+    constructor(public stream: MediaStream) {
+      FakeMediaRecorder.instances.push(this);
+    }
+    start() {
+      this.state = "recording";
+    }
+    addEventListener(type: string, listener: () => void) {
+      if (type === "stop") {
+        this.stopListeners.push(listener);
+      }
+    }
+    stop() {
+      if (this.state === "inactive") {
+        return;
+      }
+      this.state = "inactive";
+      this.ondataavailable?.({ data: new Blob(["fake-audio-bytes"]) });
+      this.stopListeners.forEach((fn) => fn());
+    }
+  }
+
+  let micIsLoud = false;
+
+  class FakeAnalyserNode {
+    fftSize = 512;
+    getByteTimeDomainData(buffer: Uint8Array) {
+      buffer.fill(micIsLoud ? 220 : 128);
+    }
+    connect() {}
+    disconnect() {}
+  }
+
+  class FakeAudioContext {
+    createMediaStreamSource() {
+      return { connect() {}, disconnect() {} };
+    }
+    createAnalyser() {
+      return new FakeAnalyserNode();
+    }
+    close() {
+      return Promise.resolve();
+    }
+  }
+
+  beforeEach(() => {
+    FakeMediaRecorder.instances = [];
+    micIsLoud = false;
+    vi.stubGlobal("MediaRecorder", FakeMediaRecorder);
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+  });
+
+  it("starts listening automatically once connected - no button press needed", async () => {
+    mockFetch({});
+    renderConsole();
+    await clickStart();
+
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+    expect(screen.queryByRole("button", { name: /hold to talk/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+  });
+
+  it("auto-sends the clip ~800ms after speech stops, then auto-resumes listening for the next turn", async () => {
+    const fetchImpl = mockFetch({
+      events: [
+        { status: 200, body: { data: { response_text: "The current tuition fee is 1,50,000." }, meta: { request_id: "req_1" } } },
+      ],
+    });
+    renderConsole();
+    await clickStart();
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+
+    await act(async () => {
+      micIsLoud = true;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      micIsLoud = false;
+    });
+
+    await waitFor(
+      () => {
+        const eventCall = fetchImpl.mock.calls.find(([input]) => String(input).includes("/events"));
+        expect(eventCall).toBeDefined();
+      },
+      { timeout: 2500 },
+    );
+
+    const eventCall = fetchImpl.mock.calls.find(([input]) => String(input).includes("/events"));
+    const body = JSON.parse((eventCall?.[1]?.body as string) ?? "{}");
+    expect(body.event_type).toBe("final_transcript");
+    expect(body.audio_base64).toBeTruthy();
+    expect(body.text).toBeUndefined();
+
+    expect(await screen.findByText("The current tuition fee is 1,50,000.")).toBeInTheDocument();
+    // No audio_url on the reply, so the mic re-arms automatically for the next turn.
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(2));
+  }, 10000);
+
+  it("never sends anything if the mic only ever picks up silence", async () => {
+    const fetchImpl = mockFetch({});
+    renderConsole();
+    await clickStart();
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    });
+
+    const eventCall = fetchImpl.mock.calls.find(([input]) => String(input).includes("/events"));
+    expect(eventCall).toBeUndefined();
+  }, 10000);
+
+  // ---------------------------------------------------------------------
+  // Opening greeting: the mic must not be armed until the greeting has
+  // actually finished playing - no button, no race between the two.
+  // ---------------------------------------------------------------------
+
+  it("does not arm the microphone while the opening greeting is still playing", async () => {
+    mockFetch({
+      createSession: {
+        status: 201,
+        body: {
+          data: {
+            session_id: "sess-greet", conversation_id: "conv-greet", status: "connecting", language: "en",
+            provider: "mock", server_url: null, connection_token: "tok", connection_expires_at: "2026-01-01T00:00:00Z",
+            ice_servers: [],
+            greeting: {
+              text: "Hi, I'm the voice admissions assistant. How can I help you today?",
+              audio_url: "https://cdn.example.com/greeting.mp3",
+              audio_duration_ms: 3000,
+            },
+          },
+          meta: { request_id: "req_1" },
+        },
+      },
+    });
+    renderConsole();
+    await clickStart();
+
+    await waitFor(() => expect(screen.getByText(/agent speaking/i)).toBeInTheDocument());
+    // The greeting is a playable URL, so playGreetingThenListen must not
+    // have fallen back to arming the mic immediately.
+    expect(FakeMediaRecorder.instances.length).toBe(0);
+    expect(screen.queryByText(/^listening$/i)).not.toBeInTheDocument();
+  });
+
+  it("automatically starts listening as soon as the greeting audio finishes - no button press", async () => {
+    mockFetch({
+      createSession: {
+        status: 201,
+        body: {
+          data: {
+            session_id: "sess-greet-2", conversation_id: "conv-greet-2", status: "connecting", language: "en",
+            provider: "mock", server_url: null, connection_token: "tok", connection_expires_at: "2026-01-01T00:00:00Z",
+            ice_servers: [],
+            greeting: {
+              text: "Hi, I'm the voice admissions assistant. How can I help you today?",
+              audio_url: "https://cdn.example.com/greeting.mp3",
+              audio_duration_ms: 3000,
+            },
+          },
+          meta: { request_id: "req_1" },
+        },
+      },
+    });
+    renderConsole();
+    await clickStart();
+
+    await waitFor(() => expect(screen.getByText(/agent speaking/i)).toBeInTheDocument());
+    expect(FakeMediaRecorder.instances.length).toBe(0);
+
+    const audioEl = document.querySelector("audio")!;
+    fireEvent.ended(audioEl);
+
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /start voice session/i })).not.toBeInTheDocument();
+  });
+
+  it("falls back to listening immediately if the greeting audio fails to play", async () => {
+    window.HTMLMediaElement.prototype.play = vi.fn().mockRejectedValue(new Error("playback blocked"));
+    mockFetch({
+      createSession: {
+        status: 201,
+        body: {
+          data: {
+            session_id: "sess-greet-3", conversation_id: "conv-greet-3", status: "connecting", language: "en",
+            provider: "mock", server_url: null, connection_token: "tok", connection_expires_at: "2026-01-01T00:00:00Z",
+            ice_servers: [],
+            greeting: {
+              text: "Hi, I'm the voice admissions assistant. How can I help you today?",
+              audio_url: "https://cdn.example.com/greeting.mp3",
+              audio_duration_ms: 3000,
+            },
+          },
+          meta: { request_id: "req_1" },
+        },
+      },
+    });
+    renderConsole();
+    await clickStart();
+
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+  });
+
+  it("falls back to listening immediately when there is no playable greeting audio (e.g. mock TTS)", async () => {
+    // mockFetch's default greeting() uses a non-playable "mock://tts/..." URL.
+    mockFetch({});
+    renderConsole();
+    await clickStart();
+
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------
+  // Session lifecycle recovery: a transient failure during an ongoing
+  // conversation must never force the whole session back to the "Start
+  // voice session" screen - only an explicit "End session" click or a
+  // genuinely unrecoverable condition (the session itself is gone) may
+  // do that. See voice-console.tsx's noteTurnFailure/noteTurnSuccess/
+  // isUnrecoverableTurnError/handleMicTrackEnded.
+  // ---------------------------------------------------------------------
+
+  it("recovers from a transient API failure during a spoken turn - stays connected and automatically listens again", async () => {
+    mockFetch({
+      events: [
+        { status: 500, body: { error: { code: "INTERNAL", message: "Temporary backend hiccup" } } },
+        { status: 200, body: { data: { response_text: "The current tuition fee is 1,50,000." }, meta: { request_id: "req_1" } } },
+      ],
+    });
+    renderConsole();
+    await clickStart();
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+
+    await act(async () => {
+      micIsLoud = true;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      micIsLoud = false;
+    });
+
+    // The turn failed - the session must stay connected (no reversion to
+    // the start screen) and automatically re-arm listening for a retry.
+    await waitFor(() => expect(screen.getByText(/temporary backend hiccup/i)).toBeInTheDocument(), { timeout: 2500 });
+    expect(screen.queryByRole("button", { name: /start voice session/i })).not.toBeInTheDocument();
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(2));
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+  }, 10000);
+
+  it("gives up on automatic listening after repeated consecutive failures, without ending the session", async () => {
+    mockFetch({
+      events: [
+        { status: 500, body: { error: { code: "INTERNAL", message: "boom" } } },
+        { status: 500, body: { error: { code: "INTERNAL", message: "boom" } } },
+        { status: 500, body: { error: { code: "INTERNAL", message: "boom" } } },
+      ],
+    });
+    renderConsole();
+    await clickStart();
+
+    const input = await screen.findByLabelText(/transcript input/i);
+    for (let i = 0; i < 3; i += 1) {
+      await userEvent.type(input, `message ${i}`);
+      await userEvent.click(screen.getByRole("button", { name: /send/i }));
+      await waitFor(() => expect(screen.getByText(/boom/i)).toBeInTheDocument());
+    }
+
+    expect(await screen.findByText(/automatic listening has been paused/i)).toBeInTheDocument();
+    // The session itself is untouched - still connected, typed composer
+    // and End session both remain usable.
+    expect(screen.queryByRole("button", { name: /start voice session/i })).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/transcript input/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /end session/i })).toBeInTheDocument();
+  });
+
+  it("recovers automatically when the MediaRecorder itself errors mid-turn", async () => {
+    mockFetch({});
+    renderConsole();
+    await clickStart();
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+
+    const firstRecorder = FakeMediaRecorder.instances[0];
+    act(() => firstRecorder.onerror?.(new Event("error")));
+
+    // A fresh recorder is armed automatically - the session stays connected.
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(2));
+    expect(screen.queryByRole("button", { name: /start voice session/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/^listening$/i)).toBeInTheDocument();
+  });
+
+  it("degrades to typed-only when the microphone track ends, without ending the session", async () => {
+    const fakeTrack: { onended: (() => void) | null } = { onended: null };
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      mediaDevices: {
+        getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [fakeTrack] } as unknown as MediaStream),
+      },
+    });
+    mockFetch({});
+    renderConsole();
+    await clickStart();
+    await waitFor(() => expect(FakeMediaRecorder.instances.length).toBe(1));
+
+    act(() => fakeTrack.onended?.());
+
+    await waitFor(() => expect(screen.getByText(/microphone disconnected/i)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /start voice session/i })).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/transcript input/i)).toBeInTheDocument();
+    // No further (pointless) listening attempts against the dead stream.
+    expect(FakeMediaRecorder.instances.length).toBe(1);
+  });
+
+  it("ends the session when the backend reports it as genuinely gone (404) - the one unrecoverable case", async () => {
+    mockFetch({
+      events: [{ status: 404, body: { error: { code: "NOT_FOUND", message: "Voice session not found." } } }],
+    });
+    renderConsole();
+    await clickStart();
+
+    const input = await screen.findByLabelText(/transcript input/i);
+    await userEvent.type(input, "hello");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    expect(await screen.findByText(/voice session not found/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /start voice session/i })).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------
+  // Root cause coverage: the backend's idle-timeout/max-duration check
+  // (VoiceSessionService.record_event()) can legitimately end a session
+  // on ANY event, including the "interruption" event this console sends
+  // before a new turn. Before this fix, that response was thrown away
+  // unread, so the console went on to send the turn's real event anyway,
+  // which then 409'd against the now-ended session - a confusing failure
+  // that (pre-fix) wasn't even recognized as unrecoverable.
+  // ---------------------------------------------------------------------
+
+  it("ends the session cleanly when the backend ends it on the interruption event itself - no confusing follow-up request", async () => {
+    const fetchImpl = mockFetch({
+      events: [
+        { status: 200, body: { data: { response_text: "Long answer playing back...", audio_url: "https://cdn.example.com/a.mp3" }, meta: { request_id: "req_1" } } },
+        { status: 200, body: { data: { status: "completed", response_text: "Are you still there? This session has ended due to inactivity." }, meta: { request_id: "req_1" } } },
+      ],
+    });
+    renderConsole();
+    await clickStart();
+
+    const input = await screen.findByLabelText(/transcript input/i);
+    await userEvent.type(input, "Tell me about admissions.");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+    await screen.findByText("Long answer playing back...");
+    await waitFor(() => expect(screen.getByText(/agent speaking/i)).toBeInTheDocument());
+
+    // A second turn while the agent is still "speaking" triggers the
+    // interruption event first - the backend's idle-timeout check fires
+    // on THAT request in this test.
+    await userEvent.type(input, "Wait, I have another question.");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    expect(await screen.findByText(/ended due to inactivity/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /start voice session/i })).toBeInTheDocument();
+
+    // Exactly 2 /events calls: turn 1's final_transcript, then the
+    // interruption that ended the session - never a 3rd, doomed request
+    // for "Wait, I have another question."
+    const eventCalls = fetchImpl.mock.calls.filter(([reqInput]) => String(reqInput).includes("/events"));
+    expect(eventCalls).toHaveLength(2);
+  });
+
+  it("ends the session (does not endlessly retry) when the backend rejects an event with 409 because it already ended", async () => {
+    mockFetch({
+      events: [{ status: 409, body: { error: { code: "VOICE_SESSION_ENDED", message: "This voice session has already ended." } } }],
+    });
+    renderConsole();
+    await clickStart();
+
+    const input = await screen.findByLabelText(/transcript input/i);
+    await userEvent.type(input, "hello");
+    await userEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    expect(await screen.findByText(/voice session has already ended/i)).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /start voice session/i })).toBeInTheDocument();
   });
 });
