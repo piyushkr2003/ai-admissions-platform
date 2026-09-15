@@ -70,6 +70,23 @@ class Settings(BaseSettings):
     gemini_tts_voice: str = "Kore"
     gemini_voice_timeout_seconds: float = 8.0
 
+    # Groq STT/LLM providers (fast cloud inference, OpenAI-compatible API)
+    # - selected via the existing STT_PROVIDER=groq / AGENT_LLM_PROVIDER=groq
+    # settings below (no separate provider-name setting is introduced).
+    # GROQ_API_KEY is read only from the backend environment - never sent to
+    # the frontend, never logged - see app/voice/providers/groq.py and
+    # app/agent/providers/groq.py. Groq has no TTS adapter here: TTS_PROVIDER
+    # stays "local" (Piper/MMS), unchanged.
+    groq_api_key: str = ""
+    groq_api_base_url: str = "https://api.groq.com"
+    groq_stt_model: str = "whisper-large-v3-turbo"
+    groq_llm_model: str = "openai/gpt-oss-20b"
+    # Groq is a fast cloud API (unlike Ollama's CPU-bound local generation),
+    # so no separate voice-specific override is needed for the LLM call
+    # (reuses llm_timeout_seconds above, same as Anthropic/Gemini). This one
+    # is for the STT call specifically, mirroring gemini_voice_timeout_seconds.
+    groq_voice_timeout_seconds: float = 8.0
+
     # Local/free providers (Task 023) - selected via the existing
     # STT_PROVIDER=local / TTS_PROVIDER=local / AGENT_LLM_PROVIDER=local
     # settings below (same pattern as "mock"/"gemini" - no separate
@@ -124,8 +141,37 @@ class Settings(BaseSettings):
     voice_transport_provider: str = "mock"
     telephony_provider: str = "mock"
     telephony_webhook_secret: str = ""
+
+    # Twilio phone-voice adapter (app/voice/providers/twilio.py,
+    # app/voice/twilio_stream.py) - independent of TELEPHONY_PROVIDER
+    # above (which selects the generic mock/JSON telephony webhook path,
+    # unchanged) since Twilio uses its own TwiML + Media Streams
+    # WebSocket endpoints (/voice/twilio/incoming, /voice/twilio/stream)
+    # rather than that generic contract. All optional: a deployment not
+    # using Twilio simply never configures these, and the mock telephony
+    # path keeps working exactly as before.
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_phone_number: str = ""
+    # The public wss:// URL Twilio should open a Media Stream to - must
+    # be reachable from Twilio's infrastructure (e.g. via ngrok in local
+    # development), and must match the /voice/twilio/stream route below.
+    twilio_stream_public_url: str = ""
     voice_session_max_duration_seconds: int = 1800
-    voice_session_idle_timeout_seconds: int = 60
+    # Reproduced via real browser + backend logs (continuous-voice session-
+    # lifecycle investigation): the previous 60s default was shorter than
+    # a completely normal conversational pause (the agent's own TTS
+    # playback for a longer answer, plus the time a real student takes to
+    # listen/think/speak again, routinely exceeds a minute), so
+    # VoiceSessionService.record_event()'s idle check
+    # (app/services/voice.py) was silently ending live, still-in-progress
+    # conversations - surfacing on the client as an unexplained return to
+    # the start screen. 300s is generous enough that no normal pause
+    # trips it, while still reclaiming a genuinely abandoned session in a
+    # bounded time (this exists for real resource reasons - see
+    # _enforce_concurrency's per-college session cap - so the mechanism
+    # itself is kept, only the threshold changes).
+    voice_session_idle_timeout_seconds: int = 300
     voice_max_concurrent_sessions_per_college: int = 20
 
     # Realtime web voice transport (Task 015) - set VOICE_TRANSPORT_PROVIDER=livekit
@@ -185,6 +231,12 @@ class Settings(BaseSettings):
             problems.append("GOOGLE_API_KEY must be set in production when STT_PROVIDER=gemini")
         if self.tts_provider.lower() == "gemini" and not self.google_api_key:
             problems.append("GOOGLE_API_KEY must be set in production when TTS_PROVIDER=gemini")
+        if self.agent_llm_provider.lower() == "groq" and not self.groq_api_key:
+            problems.append(
+                f"GROQ_API_KEY must be set in production when AGENT_LLM_PROVIDER={self.agent_llm_provider}"
+            )
+        if self.stt_provider.lower() == "groq" and not self.groq_api_key:
+            problems.append("GROQ_API_KEY must be set in production when STT_PROVIDER=groq")
         if self.stt_provider.lower() == "local":
             problems.append("STT_PROVIDER=local is a free local-demo provider and must not be used in production")
         if self.tts_provider.lower() == "local":

@@ -635,8 +635,10 @@ def test_session_ends_after_idle_timeout(client, db):
     data = _create_web_session(client, str(nova.id))
     session = db.get(VoiceSession, data["session_id"])
     # Simulate silence: the session was touched long ago but is nowhere
-    # near its max duration.
-    stale = datetime.now(timezone.utc) - timedelta(seconds=300)
+    # near its max duration. Comfortably past voice_session_idle_timeout_seconds
+    # (300s default) rather than sitting right at it, so this doesn't
+    # depend on sub-second test-execution timing to exceed the threshold.
+    stale = datetime.now(timezone.utc) - timedelta(seconds=400)
     session.updated_at = stale
     db.commit()
 
@@ -649,6 +651,55 @@ def test_session_ends_after_idle_timeout(client, db):
     db.refresh(session)
     assert session.status == "completed"
     assert session.termination_reason == "idle_timeout"
+
+
+def test_global_default_idle_timeout_is_300_seconds_not_a_stale_60():
+    """Regression guard for the session-lifecycle investigation: a normal
+    conversational pause (agent TTS playback + the student reading/
+    thinking/speaking again) routinely exceeds 60 seconds, so the old
+    default silently ended live, still-in-progress conversations. Pins
+    the value directly so a future edit can't quietly reintroduce it."""
+    settings = get_settings()
+    assert settings.voice_session_idle_timeout_seconds == 300
+
+
+def test_seeded_nova_college_has_no_stale_idle_timeout_override(db):
+    """Regression guard: AgentConfig.voice_settings.session_idle_timeout_seconds
+    (when present) takes precedence over the global default in
+    VoiceSessionService.record_event() - a leftover value seeded back
+    when the global default was still 60 would keep forcing that old,
+    too-short timeout for this college regardless of the global config
+    fix above. The key should simply be absent so this college always
+    uses whatever the global setting currently is."""
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    config = db.execute(select(AgentConfig).where(AgentConfig.college_id == nova.id)).scalar_one()
+    assert "session_idle_timeout_seconds" not in (config.voice_settings or {})
+
+
+def test_session_survives_a_pause_longer_than_the_old_60s_default(client, db):
+    """The exact scenario reproduced live: a pause well past the old 60s
+    default but comfortably under the current 300s one must NOT end the
+    session - proves both fixes together (the global default and the
+    seeded per-college override that used to silently force 60s for Nova
+    regardless of the global value)."""
+    seed_demo_data(db)
+    db.commit()
+    nova = _college(db, "nova-institute-of-technology")
+    data = _create_web_session(client, str(nova.id))
+    session = db.get(VoiceSession, data["session_id"])
+    session.updated_at = datetime.now(timezone.utc) - timedelta(seconds=120)
+    db.commit()
+
+    resp = client.post(
+        f"/api/v1/voice/sessions/{data['session_id']}/events",
+        json={"event_type": "final_transcript", "text": "Sorry, still thinking - what courses do you offer?"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"].get("status") not in ("completed", "failed")
+    db.refresh(session)
+    assert session.status not in ("completed", "failed")
 
 
 # ---------------------------------------------------------------------------

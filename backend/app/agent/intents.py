@@ -82,6 +82,13 @@ _PATTERNS: list[tuple[str, list[str]]] = [
     (ELIGIBILITY, [
         "eligible", "eligibility", "can i get into", "can i apply for",
         "qualify for", "am i eligible", "admission mil sakta",
+        # Academic-score wording (a student's own 10th/12th percentage,
+        # or the percentage/marks a course requires) previously matched
+        # no intent at all and fell through to the generic open-ended
+        # fallback - see docs/voice.md session-lifecycle investigation,
+        # "What percentage did you get in 10th class or 12th class?".
+        "percentage", "10th", "12th", "tenth class", "twelfth class",
+        "marks", "marksheet", "qualification", "cutoff", "cut off",
     ]),
     (REQUIRED_DOCUMENTS, [
         "documents required", "required documents", "which documents",

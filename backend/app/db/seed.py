@@ -223,7 +223,18 @@ def _seed_nova(db: Session) -> dict:
             "default_language": "en",
             "fallback_language": "en",
             "voice_id": "nova-assist-default",
-            "session_idle_timeout_seconds": 60,
+            # No session_idle_timeout_seconds override here - this used to
+            # hardcode 60, which happened to match the old global default
+            # at the time it was seeded but then silently became a
+            # stale, always-wins per-college override once the global
+            # default was raised to a more conversation-realistic value
+            # (app/core/config.py::voice_session_idle_timeout_seconds) -
+            # VoiceSessionService.record_event() prefers this value over
+            # the global setting whenever it is truthy, so a lower
+            # leftover value here would keep forcing the old timeout for
+            # this college regardless of the global config. Omitting the
+            # key (see _voice_settings_for's own None default) means Nova
+            # always uses whatever the global setting currently is.
             "max_session_duration_seconds": 1800,
             "recording_enabled": False,
             "transcript_enabled": True,

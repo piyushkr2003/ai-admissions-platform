@@ -93,6 +93,27 @@ def test_detect_intents_unknown_for_greeting_alone():
     assert I.GENERAL_COLLEGE_INFO in intents
 
 
+def test_detect_intents_eligibility_matches_academic_score_wording():
+    """Regression guard - this exact phrase previously matched no intent
+    at all (fell through to UNKNOWN -> the generic open-ended fallback,
+    an "unrelated answer" from the student's point of view) since
+    ELIGIBILITY had no percentage/10th/12th/marks/qualification keywords.
+    See docs/voice.md's session-lifecycle investigation."""
+    assert I.detect_intents("What percentage did you get in 10th class or 12th class?") == [I.ELIGIBILITY]
+    assert I.ELIGIBILITY in I.detect_intents("What is your percentage in 12th?")
+    assert I.ELIGIBILITY in I.detect_intents("I scored 78% in 10th, am I eligible?")
+    assert I.ELIGIBILITY in I.detect_intents("What marks do I need for CSE?")
+    assert I.ELIGIBILITY in I.detect_intents("What is the minimum qualification required?")
+    assert I.ELIGIBILITY in I.detect_intents("What is the cutoff for admission?")
+    assert I.ELIGIBILITY in I.detect_intents("Can you check my marksheet percentage?")
+
+
+def test_detect_intents_eligibility_keywords_do_not_false_positive_on_unrelated_intents():
+    assert I.ELIGIBILITY not in I.detect_intents("What documents are required?")
+    assert I.ELIGIBILITY not in I.detect_intents("What is the fee for CSE?")
+    assert I.ELIGIBILITY not in I.detect_intents("Tell me about your college")
+
+
 # ---------------------------------------------------------------------------
 # Unit: slot extraction
 # ---------------------------------------------------------------------------
