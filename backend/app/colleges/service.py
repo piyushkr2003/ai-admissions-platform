@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.colleges.repository import CollegeRepository
-from app.colleges.schemas import CollegeConfigurationUpdate, CollegeCreate, CollegeIdentityUpdate
+from app.colleges.schemas import (
+    CollegeAdminBootstrap,
+    CollegeConfigurationUpdate,
+    CollegeCreate,
+    CollegeIdentityUpdate,
+)
 from app.colleges.validators import (
     ValidationResult,
     is_allowed_transition,
@@ -15,7 +21,9 @@ from app.colleges.validators import (
     validate_college_configuration,
 )
 from app.core.errors import ConflictError, NotFoundError, ValidationAppError
+from app.core.security import hash_password
 from app.models.college import College
+from app.models.user import User
 from app.services.audit import record_audit
 
 
@@ -92,6 +100,53 @@ class CollegeService:
             action="college_created", entity_type="college", entity_id=college.id,
         )
         return college
+
+    def create_initial_admin(
+        self, college: College, payload: CollegeAdminBootstrap, *, actor_user_id: uuid.UUID | None
+    ) -> User:
+        """Provision the first `college_admin` account for `college`.
+
+        Production onboarding bootstrap only - deliberately separate from
+        `app/db/seed.py`'s fictional demo fixture. Refuses to run if the
+        college already has a college_admin (this is a one-time bootstrap,
+        not a general admin-invite mechanism) or if the email is already
+        taken (User.email is globally unique).
+        """
+        normalized_email = payload.email.strip().lower()
+
+        existing_admin = self.db.execute(
+            select(User).where(User.college_id == college.id, User.role == "college_admin")
+        ).scalar_one_or_none()
+        if existing_admin is not None:
+            raise ConflictError(f"College '{college.slug}' already has a college_admin.")
+
+        existing_user = self.db.execute(
+            select(User).where(User.email == normalized_email)
+        ).scalar_one_or_none()
+        if existing_user is not None:
+            raise ConflictError("A user with this email already exists.")
+
+        try:
+            password_hash = hash_password(payload.password)
+        except ValueError as exc:
+            raise ValidationAppError(str(exc)) from exc
+
+        admin = User(
+            college_id=college.id,
+            email=normalized_email,
+            password_hash=password_hash,
+            full_name=payload.full_name,
+            role="college_admin",
+            is_active=True,
+        )
+        self.db.add(admin)
+        self.db.flush()
+        record_audit(
+            self.db, college_id=college.id, user_id=actor_user_id,
+            action="college_admin_bootstrapped", entity_type="user", entity_id=admin.id,
+            meta={"email": normalized_email},
+        )
+        return admin
 
     def update_identity(
         self, college: College, payload: CollegeIdentityUpdate, *, actor_user_id: uuid.UUID | None

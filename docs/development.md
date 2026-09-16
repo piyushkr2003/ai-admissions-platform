@@ -2744,6 +2744,38 @@ With the backend running and Nova bootstrapped, drive the same conversation `tes
 
 `tests/test_nova_demo.py` covers: bootstrap on an empty database and idempotent rerun, upserting an already-seeded legacy Nova row without duplication, `--reset` re-ingestion without duplicating chunks, structured field mapping (fees/eligibility/scholarships/dates/documents/counselors/availability), RAG ingestion and Nova-scoped retrieval, tenant isolation across structured data/RAG/counselor availability/the agent, direct agent-tool calls proving structured facts come from the database (not an LLM), and the full demo conversation end to end through the real `AgentOrchestrator` (course -> eligibility -> fee -> scholarship -> counselor -> booking -> lead -> application draft).
 
+## Production College Admin Bootstrap
+
+`app/db/seed.py` (`seed_demo_data`) and `app/db/nova_demo.py` (`bootstrap_nova_demo`) are fictional dev/test fixtures and must never be run against production - neither one creates a usable production account anyway, since both are documented as demo-only. Until this addendum, there was no production-safe way to create a `college_admin` login at all: the only code path that ever constructs a `User` row was `app/db/seed.py`.
+
+`app/colleges/service.py::CollegeService.create_initial_admin` and its CLI wrapper `scripts/create_college_admin.py` close that gap. This is a one-time bootstrap for the *first* `college_admin` of an existing college, not a general admin-invite endpoint - it refuses if the college already has one.
+
+### Why this is a CLI script, not an API endpoint
+
+An HTTP endpoint would need to be gated by `require_platform_admin` (see `app/colleges/router.py`'s `POST /colleges`), but a fresh production database has no `platform_admin` either - nothing could ever call it the first time. Instead, authorization comes from *execution access*: only someone who can run a command against the target database can invoke this script, the same trust boundary `scripts/bootstrap_nova_demo.py` and `scripts/seed_demo.py` already rely on.
+
+### Running it against Render production (free tier)
+
+Render's free web-service plan has no Shell tab, no SSH, no Pre-Deploy Command, and no one-off Jobs - all of those require a paid plan. The practical, no-cost way to run this script is from a local machine (or CI), connecting directly to Render's managed Postgres over its **External Database URL** (visible on the Postgres instance's page in the Render dashboard under "Connections" - this exists on the free Postgres plan too, no upgrade required):
+
+```bash
+cd backend
+export DATABASE_URL="<Render Postgres External Database URL>"
+export ADMIN_BOOTSTRAP_PASSWORD="<a strong password, chosen for this run only>"
+python scripts/create_college_admin.py \
+    --college-slug nova-institute-of-technology \
+    --email admin@nova-institute-of-technology.example.edu \
+    --full-name "Priya Sharma"
+```
+
+If `ADMIN_BOOTSTRAP_PASSWORD` isn't set, the script prompts for the password interactively (`getpass`, not echoed to the terminal) instead. The password is never a CLI argument, never hardcoded, and never logged - only `hash_password()`'s Argon2 hash is persisted.
+
+The script fails closed: it exits non-zero and writes nothing if the college slug doesn't exist, if the college already has a `college_admin`, or if the email is already registered.
+
+### Testing
+
+`tests/test_admin_provisioning.py` covers: password hashing (the stored hash differs from the plaintext and verifies correctly), rejection of a too-short password and an invalid email at the schema level, rejection of a second `college_admin` for the same college, rejection of a duplicate email across colleges, the audit log entry, the CLI's handling of an unknown college slug and of the `ADMIN_BOOTSTRAP_PASSWORD` env var taking precedence over the interactive prompt, and an end-to-end login through the real, unmodified `POST /api/v1/auth/login` endpoint using the bootstrapped credentials.
+
 ## Real Gemini STT + TTS (Task 017 Addendum)
 
 See docs/voice.md section 74 for the full architecture and what was/wasn't live-tested.

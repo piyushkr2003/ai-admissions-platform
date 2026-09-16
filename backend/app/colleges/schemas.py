@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class CollegeCreate(BaseModel):
@@ -85,3 +85,15 @@ class CollegeOut(BaseModel):
 class ValidationResultOut(BaseModel):
     valid: bool
     errors: list[str]
+
+
+class CollegeAdminBootstrap(BaseModel):
+    """Input for provisioning the first `college_admin` account for a
+    college (production onboarding bootstrap, not the dev/test demo
+    seed). `password` is plaintext only for the duration of this
+    in-memory validation step - the caller must never persist or log it;
+    it is hashed via `app.core.security.hash_password` before storage."""
+
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=8)
