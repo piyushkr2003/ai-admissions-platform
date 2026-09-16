@@ -2776,6 +2776,30 @@ The script fails closed: it exits non-zero and writes nothing if the college slu
 
 `tests/test_admin_provisioning.py` covers: password hashing (the stored hash differs from the plaintext and verifies correctly), rejection of a too-short password and an invalid email at the schema level, rejection of a second `college_admin` for the same college, rejection of a duplicate email across colleges, the audit log entry, the CLI's handling of an unknown college slug and of the `ADMIN_BOOTSTRAP_PASSWORD` env var taking precedence over the interactive prompt, and an end-to-end login through the real, unmodified `POST /api/v1/auth/login` endpoint using the bootstrapped credentials.
 
+## First Production Tenant Bootstrap
+
+`scripts/create_college_admin.py` (above) requires an *existing* college - it can't create the very first tenant on a database that has zero colleges and zero users. `scripts/create_first_college.py` closes that remaining gap by combining `CollegeService.create_college` and `CollegeService.create_initial_admin` (the same two methods, unmodified) in a **single transaction**: a failure creating the admin also undoes the college insert, so a failed run never leaves a half-created tenant behind.
+
+```bash
+cd backend
+export DATABASE_URL="<Render Postgres External Database URL>"   # see above for how to find this on Render's free tier
+export ADMIN_BOOTSTRAP_PASSWORD="<a strong password, chosen for this run only>"
+python scripts/create_first_college.py \
+    --name "Nova Institute of Technology" \
+    --email admissions@nova-institute-of-technology.example.edu \
+    --phone "+91-9800000000" \
+    --admin-email admin@nova-institute-of-technology.example.edu \
+    --admin-full-name "Priya Sharma"
+```
+
+`--slug` is optional (derived from `--name` via the existing `normalize_slug()` if omitted). `timezone`, `default_language`, `supported_languages`, and `feature_flags` are left at `CollegeCreate`'s existing defaults rather than exposed as flags - they're configurable later through the normal `PATCH /colleges/{id}`/`PATCH /colleges/{id}/configuration` onboarding flow. The password follows the same `ADMIN_BOOTSTRAP_PASSWORD`-or-`getpass` rule as `create_college_admin.py`, and is likewise never a CLI argument.
+
+The college is created in `status="draft"` - this script never publishes it. It creates exactly one `College` row and one `college_admin` `User` row (plus the two audit-log entries `CollegeService` already records), and nothing else: no courses, FAQs, scholarships, counselors, or knowledge sources. It never imports from `app/db/seed.py` or `app/db/nova_demo.py`.
+
+### Testing
+
+`tests/test_first_college_provisioning.py` covers: successful creation of both rows in one call (college left in `draft`, admin hashed/role-correct, both audit entries present), confirmation that no course/knowledge/agent-config rows are created, slug auto-derivation when `--slug` is omitted, rejection of a duplicate college slug, rejection of a duplicate admin email together with the college-side rollback (the second college is verified absent afterward), rejection of a too-short password before any write happens, and the `ADMIN_BOOTSTRAP_PASSWORD` env var taking precedence over the interactive prompt.
+
 ## Real Gemini STT + TTS (Task 017 Addendum)
 
 See docs/voice.md section 74 for the full architecture and what was/wasn't live-tested.
