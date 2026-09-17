@@ -76,15 +76,15 @@ class Settings(BaseSettings):
     # separate provider-name setting is introduced). GROQ_API_KEY is read
     # only from the backend environment - never sent to the frontend,
     # never logged - see app/voice/providers/groq.py and
-    # app/agent/providers/groq.py. Groq's TTS (PlayAI) only synthesizes
+    # app/agent/providers/groq.py. Groq's TTS (Orpheus) only synthesizes
     # English/Arabic speech - see app/voice/providers/groq.py's module
     # docstring for what that means for a deployment serving Hindi/Kannada
     # voice too.
     groq_api_key: str = ""
     groq_api_base_url: str = "https://api.groq.com"
     groq_stt_model: str = "whisper-large-v3-turbo"
-    groq_tts_model: str = "playai-tts"
-    groq_tts_voice: str = "Fritz-PlayAI"
+    groq_tts_model: str = "canopylabs/orpheus-v1-english"
+    groq_tts_voice: str = "troy"
     groq_llm_model: str = "openai/gpt-oss-20b"
     # Groq is a fast cloud API (unlike Ollama's CPU-bound local generation),
     # so no separate voice-specific override is needed for the LLM call

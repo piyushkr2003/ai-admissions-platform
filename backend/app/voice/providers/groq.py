@@ -1,5 +1,5 @@
 """Production STT/TTS provider adapters for Groq (fast cloud Whisper
-inference + PlayAI TTS).
+inference + Orpheus TTS).
 
 Both call Groq's OpenAI-compatible audio endpoints
 (https://console.groq.com/docs/speech-to-text,
@@ -18,16 +18,20 @@ Selected via the existing `STT_PROVIDER=groq` / `TTS_PROVIDER=groq`
 settings (app/voice/providers/factory.py) - no second, competing
 provider-name setting is introduced.
 
-IMPORTANT language limitation: Groq's PlayAI TTS models only synthesize
-English (`playai-tts`) or Arabic (`playai-tts-arabic`) speech - there is
-no Hindi or Kannada voice. `GroqTTSProvider` does not attempt to detect or
-reject other languages itself (it has no way to know what the caller
-intends beyond the `language` hint, and Groq's API is the actual source
-of truth on what it can synthesize) - selecting `TTS_PROVIDER=groq` in a
-deployment that also serves Hindi/Kannada voice sessions will simply get
-a Groq API error (surfaced as the usual `ResourceUnavailableError`) for
-those turns. A deployment needing all three languages should keep
-`TTS_PROVIDER=gemini` (or route by language at a higher layer) instead.
+IMPORTANT language limitation: Groq's TTS offering is the Orpheus model
+family, and only synthesizes English (`canopylabs/orpheus-v1-english`) or
+Arabic (`canopylabs/orpheus-arabic-saudi`, Saudi dialect) speech - there
+is no Hindi or Kannada voice (Groq previously offered `playai-tts`, which
+had the same limitation, but that model line was decommissioned -
+Orpheus is its replacement, confirmed against Groq's own docs as of this
+writing). `GroqTTSProvider` does not attempt to detect or reject other
+languages itself (it has no way to know what the caller intends beyond
+the `language` hint, and Groq's API is the actual source of truth on what
+it can synthesize) - selecting `TTS_PROVIDER=groq` in a deployment that
+also serves Hindi/Kannada voice sessions will simply get a Groq API error
+(surfaced as the usual `ResourceUnavailableError`) for those turns. A
+deployment needing all three languages should keep `TTS_PROVIDER=gemini`
+(or route by language at a higher layer) instead.
 """
 from __future__ import annotations
 
