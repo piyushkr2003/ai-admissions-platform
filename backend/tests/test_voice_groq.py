@@ -497,6 +497,34 @@ def test_tts_synthesize_raises_on_http_error(monkeypatch):
         provider.synthesize("hello")
 
 
+def test_tts_synthesize_includes_groqs_own_error_message_on_http_error(monkeypatch):
+    """Diagnosability fix: a bare 'Groq TTS API returned HTTP 400.' gives
+    no way to tell a bad model/voice name apart from a not-yet-enabled
+    model on this account - Groq's own JSON error body carries that
+    reason, so it must be surfaced rather than discarded."""
+    error_body = json.dumps({"error": {"message": "model_not_found: the requested model does not exist"}}).encode("utf-8")
+
+    def fake_urlopen(request, timeout=None, context=None):
+        raise urllib.error.HTTPError(request.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(error_body))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    with pytest.raises(ResourceUnavailableError, match="model_not_found"):
+        provider.synthesize("hello")
+
+
+def test_tts_synthesize_raises_on_http_error_with_unparseable_body(monkeypatch):
+    """A malformed/absent error body must not itself crash error
+    handling - falls back to the bare HTTP-status message."""
+    def fake_urlopen(request, timeout=None, context=None):
+        raise urllib.error.HTTPError(request.full_url, 500, "Server Error", hdrs=None, fp=BytesIO(b"not json"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    with pytest.raises(ResourceUnavailableError, match="Groq TTS API returned HTTP 500"):
+        provider.synthesize("hello")
+
+
 def test_tts_synthesize_raises_on_timeout(monkeypatch):
     def fake_urlopen(request, timeout=None, context=None):
         raise TimeoutError("timed out")

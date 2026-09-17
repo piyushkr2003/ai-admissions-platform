@@ -257,6 +257,17 @@ class GroqSTTProvider(STTProvider):
             raise ResourceUnavailableError("Groq STT API returned a malformed response.") from exc
 
 
+def _read_error_detail(exc: urllib.error.HTTPError) -> str | None:
+    """Best-effort extraction of Groq's own error message from an
+    HTTPError's response body - never raises itself (a malformed/absent
+    body must not hide the original HTTP status behind a second error)."""
+    try:
+        body = json.loads(exc.read().decode("utf-8"))
+        return (body.get("error") or {}).get("message")
+    except Exception:  # noqa: BLE001 - diagnostic best-effort only
+        return None
+
+
 def _wav_duration_ms(wav_bytes: bytes) -> int:
     """Reads the duration back out of a WAV file's own header - Groq's TTS
     endpoint already returns `response_format=wav` audio (unlike Gemini's
@@ -330,8 +341,18 @@ class GroqTTSProvider(TTSProvider):
             with urllib.request.urlopen(request, timeout=self._timeout_seconds, context=_SSL_CONTEXT) as response:
                 return response.read()
         except urllib.error.HTTPError as exc:
-            logger.warning("voice.tts_groq_http_error status=%s", exc.code)
-            raise ResourceUnavailableError(f"Groq TTS API returned HTTP {exc.code}.") from exc
+            # Groq's error responses are small JSON bodies
+            # ({"error": {"message": ..., "type": ...}}) - surfacing that
+            # message (never the request body, which never contains the
+            # key anyway - see the module docstring) turns "HTTP 400" into
+            # an actually diagnosable reason (bad model/voice name, model
+            # not enabled for this account, etc.) instead of a bare code.
+            detail = _read_error_detail(exc)
+            logger.warning("voice.tts_groq_http_error status=%s detail=%s", exc.code, detail)
+            message = f"Groq TTS API returned HTTP {exc.code}."
+            if detail:
+                message += f" {detail}"
+            raise ResourceUnavailableError(message) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, ssl.SSLError):
                 logger.warning("voice.tts_groq_tls_verification_failed reason=%s", exc.reason.__class__.__name__)
