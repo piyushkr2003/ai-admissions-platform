@@ -1,35 +1,50 @@
-"""Production STT provider adapter for Groq (fast cloud Whisper inference).
+"""Production STT/TTS provider adapters for Groq (fast cloud Whisper
+inference + PlayAI TTS).
 
-Calls Groq's OpenAI-compatible audio transcription endpoint
-(https://console.groq.com/docs/speech-to-text) directly with the
-standard library's `urllib` - same "one bounded HTTP call, no SDK"
-reasoning as `app/voice/providers/gemini.py` and
-`app/agent/providers/anthropic.py`. The only wrinkle versus those JSON
-adapters is that this endpoint takes `multipart/form-data` (a file part),
-so this module builds that body by hand rather than adding a dependency
-(`requests`, `groq`) purely for multipart encoding.
+Both call Groq's OpenAI-compatible audio endpoints
+(https://console.groq.com/docs/speech-to-text,
+https://console.groq.com/docs/text-to-speech) directly with the standard
+library's `urllib` - same "one bounded HTTP call, no SDK" reasoning as
+`app/voice/providers/gemini.py` and `app/agent/providers/anthropic.py`.
+STT takes `multipart/form-data` (a file part), so that request body is
+built by hand rather than adding a dependency (`requests`, `groq`) purely
+for multipart encoding; TTS is a plain JSON POST that returns raw audio
+bytes directly (not JSON), unlike Gemini's base64-in-JSON response shape.
 
 `GROQ_API_KEY` is sent only in the `Authorization: Bearer` request header
 (never the URL or request body) and is never logged.
 
-Selected via the existing `STT_PROVIDER=groq` setting
-(app/voice/providers/factory.py) - no second, competing provider-name
-setting is introduced. Groq has no TTS adapter here: `TTS_PROVIDER` stays
-`local` (Piper/MMS, app/voice/providers/local.py), unchanged.
+Selected via the existing `STT_PROVIDER=groq` / `TTS_PROVIDER=groq`
+settings (app/voice/providers/factory.py) - no second, competing
+provider-name setting is introduced.
+
+IMPORTANT language limitation: Groq's PlayAI TTS models only synthesize
+English (`playai-tts`) or Arabic (`playai-tts-arabic`) speech - there is
+no Hindi or Kannada voice. `GroqTTSProvider` does not attempt to detect or
+reject other languages itself (it has no way to know what the caller
+intends beyond the `language` hint, and Groq's API is the actual source
+of truth on what it can synthesize) - selecting `TTS_PROVIDER=groq` in a
+deployment that also serves Hindi/Kannada voice sessions will simply get
+a Groq API error (surfaced as the usual `ResourceUnavailableError`) for
+those turns. A deployment needing all three languages should keep
+`TTS_PROVIDER=gemini` (or route by language at a higher layer) instead.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import ssl
 import urllib.error
 import urllib.request
 import uuid
+import wave
+from io import BytesIO
 
 import certifi
 
 from app.core.errors import ResourceUnavailableError
-from app.voice.providers.base import STTProvider, STTResult
+from app.voice.providers.base import STTProvider, STTResult, TTSProvider, TTSResult
 from app.voice.worker.pcm import pcm16_to_wav_bytes
 
 logger = logging.getLogger("app.voice.groq")
@@ -240,3 +255,92 @@ class GroqSTTProvider(STTProvider):
         except (ValueError, json.JSONDecodeError) as exc:
             logger.warning("voice.stt_groq_malformed_response")
             raise ResourceUnavailableError("Groq STT API returned a malformed response.") from exc
+
+
+def _wav_duration_ms(wav_bytes: bytes) -> int:
+    """Reads the duration back out of a WAV file's own header - Groq's TTS
+    endpoint already returns `response_format=wav` audio (unlike Gemini's
+    raw PCM-in-base64, which this project itself has to wrap via
+    `pcm16_to_wav_bytes`), so the frame count/rate are simply read rather
+    than computed. Returns 0 (rather than raising) for a response that,
+    despite a 200 status, isn't a well-formed WAV - synthesis should not
+    fail a turn over a duration estimate that is only ever used for
+    display/logging, never played-back correctness."""
+    try:
+        with wave.open(BytesIO(wav_bytes), "rb") as wav_file:
+            frame_rate = wav_file.getframerate()
+            if not frame_rate:
+                return 0
+            return int(wav_file.getnframes() / frame_rate * 1000)
+    except (wave.Error, EOFError):
+        return 0
+
+
+class GroqTTSProvider(TTSProvider):
+    name = "groq"
+
+    def __init__(self, *, api_key: str, model: str, base_url: str, timeout_seconds: float, voice_name: str):
+        if not api_key:
+            raise ValueError("GroqTTSProvider requires an api_key.")
+        if not voice_name:
+            raise ValueError("GroqTTSProvider requires a voice_name.")
+        self._api_key = api_key
+        self._model = model
+        self._base_url = base_url.rstrip("/")
+        self._timeout_seconds = timeout_seconds
+        self._voice_name = voice_name
+
+    def synthesize(self, text: str, *, language: str = "en", voice_id: str | None = None) -> TTSResult:
+        if not text or not text.strip():
+            raise ResourceUnavailableError("Groq TTS API requires non-empty text to synthesize.")
+
+        payload = {
+            "model": self._model,
+            "input": text,
+            "voice": voice_id or self._voice_name,
+            "response_format": "wav",
+        }
+        wav_bytes = self._post(payload)
+        if not wav_bytes:
+            logger.warning("voice.tts_groq_no_audio_data")
+            raise ResourceUnavailableError("Groq TTS API returned no audio data.")
+
+        duration_ms = _wav_duration_ms(wav_bytes)
+        provider_ref = hashlib.sha1(f"{text}:{voice_id or self._voice_name}".encode("utf-8")).hexdigest()[:16]
+        return TTSResult(audio_url=None, audio_bytes=wav_bytes, duration_ms=duration_ms, provider_ref=provider_ref)
+
+    def cancel(self, provider_ref: str) -> None:
+        """Best-effort no-op - Groq's TTS endpoint is stateless and has
+        already completed by the time a TTSResult is returned, mirroring
+        GeminiTTSProvider.cancel's identical must-never-raise contract."""
+        return None
+
+    def _post(self, payload: dict) -> bytes:
+        request = urllib.request.Request(
+            f"{self._base_url}/openai/v1/audio/speech",
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {self._api_key}",
+                "user-agent": "ai-admissions-platform/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout_seconds, context=_SSL_CONTEXT) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            logger.warning("voice.tts_groq_http_error status=%s", exc.code)
+            raise ResourceUnavailableError(f"Groq TTS API returned HTTP {exc.code}.") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ssl.SSLError):
+                logger.warning("voice.tts_groq_tls_verification_failed reason=%s", exc.reason.__class__.__name__)
+                raise ResourceUnavailableError(
+                    "Groq TTS API's TLS certificate could not be verified from this server "
+                    "(local certificate trust store issue, not a Groq outage)."
+                ) from exc
+            logger.warning("voice.tts_groq_unreachable")
+            raise ResourceUnavailableError("Groq TTS API was unreachable or timed out.") from exc
+        except TimeoutError as exc:
+            logger.warning("voice.tts_groq_unreachable")
+            raise ResourceUnavailableError("Groq TTS API was unreachable or timed out.") from exc

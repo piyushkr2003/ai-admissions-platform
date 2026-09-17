@@ -1,5 +1,5 @@
-"""Groq STT provider adapter (whisper-large-v3-turbo via Groq's
-OpenAI-compatible API).
+"""Groq STT/TTS provider adapters (whisper-large-v3-turbo + PlayAI TTS via
+Groq's OpenAI-compatible API).
 
 Covers request construction (including the hand-rolled multipart body -
 Groq's transcription endpoint, unlike the JSON-only Gemini/Anthropic
@@ -11,21 +11,27 @@ made anywhere in this file - `urllib.request.urlopen` is monkeypatched
 throughout, exactly like tests/test_voice_gemini.py does for the sibling
 Gemini adapter.
 
-Groq has no TTS adapter (TTS_PROVIDER stays "local"/Piper), so there is
-no TTS coverage here to mirror test_voice_gemini.py's TTS section.
+TTS coverage mirrors test_voice_gemini.py's TTS section, with one
+structural difference: Groq's TTS endpoint returns raw audio bytes
+directly (not JSON/base64), so GroqTTSProvider's response handling is
+simpler than GeminiTTSProvider's - there is no candidates/parts/
+inlineData shape to unwrap, so there are no "no candidates"/"no audio
+data" malformed-response variants to test here, only "empty body".
 """
 from __future__ import annotations
 
 import json
 import logging
 import urllib.error
+import wave
+from io import BytesIO
 
 import pytest
 
 from app.core.config import Settings, get_settings
 from app.core.errors import ResourceUnavailableError
-from app.voice.providers.factory import get_stt_provider
-from app.voice.providers.groq import GroqSTTProvider, _to_groq_language
+from app.voice.providers.factory import get_stt_provider, get_tts_provider
+from app.voice.providers.groq import GroqSTTProvider, GroqTTSProvider, _to_groq_language
 
 FAKE_KEY = "gsk-super-secret-value"
 
@@ -42,6 +48,30 @@ class _FakeHTTPResponse:
 
     def __exit__(self, *args):
         return False
+
+
+class _FakeBinaryResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _sample_wav_bytes(num_frames: int = 4800, frame_rate: int = 24000) -> bytes:
+    buffer = BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(frame_rate)
+        wav_file.writeframes(b"\x00\x00" * num_frames)
+    return buffer.getvalue()
 
 
 def _sample_pcm16(num_samples: int = 400) -> bytes:
@@ -394,6 +424,141 @@ def test_stt_factory_returns_groq_provider_when_configured(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# GroqTTSProvider - construction / request / response
+# ---------------------------------------------------------------------------
+
+def test_tts_provider_constructor_requires_api_key():
+    with pytest.raises(ValueError):
+        GroqTTSProvider(api_key="", model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+
+
+def test_tts_provider_constructor_requires_voice_name():
+    with pytest.raises(ValueError):
+        GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="")
+
+
+def test_tts_synthesize_raises_on_empty_text():
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    with pytest.raises(ResourceUnavailableError):
+        provider.synthesize("   ")
+
+
+def test_tts_synthesize_sends_expected_request_and_parses_response(monkeypatch):
+    captured = {}
+    wav_bytes = _sample_wav_bytes(num_frames=4800, frame_rate=24000)
+
+    def fake_urlopen(request, timeout=None, context=None):
+        captured["url"] = request.full_url
+        captured["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["timeout"] = timeout
+        return _FakeBinaryResponse(wav_bytes)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+
+    result = provider.synthesize("Your tuition fee is one lakh fifty thousand rupees.", language="en")
+
+    assert captured["url"] == "https://api.groq.com/openai/v1/audio/speech"
+    assert captured["headers"]["authorization"] == f"Bearer {FAKE_KEY}"
+    assert FAKE_KEY not in captured["url"]
+    assert captured["body"] == {
+        "model": "playai-tts", "input": "Your tuition fee is one lakh fifty thousand rupees.",
+        "voice": "Fritz-PlayAI", "response_format": "wav",
+    }
+    assert captured["timeout"] == 5
+
+    assert result.audio_url is None
+    assert result.audio_bytes == wav_bytes
+    assert result.provider_ref
+    assert result.duration_ms == 200  # 4800 frames / 24000 Hz
+
+
+def test_tts_synthesize_honors_voice_id_override(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout=None, context=None):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return _FakeBinaryResponse(_sample_wav_bytes())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    provider.synthesize("hello", voice_id="Arista-PlayAI")
+    assert captured["body"]["voice"] == "Arista-PlayAI"
+
+
+def test_tts_synthesize_raises_on_http_error(monkeypatch):
+    def fake_urlopen(request, timeout=None, context=None):
+        raise urllib.error.HTTPError(request.full_url, 500, "Server Error", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    with pytest.raises(ResourceUnavailableError):
+        provider.synthesize("hello")
+
+
+def test_tts_synthesize_raises_on_timeout(monkeypatch):
+    def fake_urlopen(request, timeout=None, context=None):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    with pytest.raises(ResourceUnavailableError):
+        provider.synthesize("hello")
+
+
+def test_tts_synthesize_raises_when_response_body_is_empty(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None, context=None: _FakeBinaryResponse(b""))
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    with pytest.raises(ResourceUnavailableError):
+        provider.synthesize("hello")
+
+
+def test_tts_synthesize_returns_zero_duration_for_a_non_wav_body_without_raising(monkeypatch):
+    """A malformed/non-WAV 200 response must not crash the turn - the
+    duration estimate degrades to 0 rather than the whole synthesis
+    failing, mirroring _wav_duration_ms's documented fail-safe contract."""
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None, context=None: _FakeBinaryResponse(b"not a wav file"))
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    result = provider.synthesize("hello")
+    assert result.duration_ms == 0
+    assert result.audio_bytes == b"not a wav file"
+
+
+def test_tts_synthesize_never_logs_the_api_key(monkeypatch, caplog):
+    def fake_urlopen(request, timeout=None, context=None):
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    with caplog.at_level(logging.DEBUG, logger="app.voice.groq"):
+        with pytest.raises(ResourceUnavailableError):
+            provider.synthesize("hello")
+    logged_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert FAKE_KEY not in logged_text
+
+
+def test_tts_cancel_is_a_best_effort_no_op():
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="playai-tts", base_url="https://api.groq.com", timeout_seconds=5, voice_name="Fritz-PlayAI")
+    provider.cancel("some-ref")  # must not raise
+
+
+def test_tts_factory_fails_closed_when_groq_selected_without_api_key(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "tts_provider", "groq")
+    monkeypatch.setattr(settings, "groq_api_key", "")
+    with pytest.raises(ResourceUnavailableError):
+        get_tts_provider()
+
+
+def test_tts_factory_returns_groq_provider_when_configured(monkeypatch):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "tts_provider", "groq")
+    monkeypatch.setattr(settings, "groq_api_key", "test-key")
+    assert isinstance(get_tts_provider(), GroqTTSProvider)
+
+
+# ---------------------------------------------------------------------------
 # Production fail-closed validation
 # ---------------------------------------------------------------------------
 
@@ -415,6 +580,12 @@ def _production_settings(**overrides) -> Settings:
 
 def test_production_requires_groq_api_key_when_groq_stt_selected():
     settings = _production_settings(stt_provider="groq")
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
+        settings.validate_for_production()
+
+
+def test_production_requires_groq_api_key_when_groq_tts_selected():
+    settings = _production_settings(tts_provider="groq")
     with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
         settings.validate_for_production()
 

@@ -70,16 +70,21 @@ class Settings(BaseSettings):
     gemini_tts_voice: str = "Kore"
     gemini_voice_timeout_seconds: float = 8.0
 
-    # Groq STT/LLM providers (fast cloud inference, OpenAI-compatible API)
-    # - selected via the existing STT_PROVIDER=groq / AGENT_LLM_PROVIDER=groq
-    # settings below (no separate provider-name setting is introduced).
-    # GROQ_API_KEY is read only from the backend environment - never sent to
-    # the frontend, never logged - see app/voice/providers/groq.py and
-    # app/agent/providers/groq.py. Groq has no TTS adapter here: TTS_PROVIDER
-    # stays "local" (Piper/MMS), unchanged.
+    # Groq STT/TTS/LLM providers (fast cloud inference, OpenAI-compatible
+    # API) - selected via the existing STT_PROVIDER=groq /
+    # TTS_PROVIDER=groq / AGENT_LLM_PROVIDER=groq settings below (no
+    # separate provider-name setting is introduced). GROQ_API_KEY is read
+    # only from the backend environment - never sent to the frontend,
+    # never logged - see app/voice/providers/groq.py and
+    # app/agent/providers/groq.py. Groq's TTS (PlayAI) only synthesizes
+    # English/Arabic speech - see app/voice/providers/groq.py's module
+    # docstring for what that means for a deployment serving Hindi/Kannada
+    # voice too.
     groq_api_key: str = ""
     groq_api_base_url: str = "https://api.groq.com"
     groq_stt_model: str = "whisper-large-v3-turbo"
+    groq_tts_model: str = "playai-tts"
+    groq_tts_voice: str = "Fritz-PlayAI"
     groq_llm_model: str = "openai/gpt-oss-20b"
     # Groq is a fast cloud API (unlike Ollama's CPU-bound local generation),
     # so no separate voice-specific override is needed for the LLM call
@@ -237,6 +242,8 @@ class Settings(BaseSettings):
             )
         if self.stt_provider.lower() == "groq" and not self.groq_api_key:
             problems.append("GROQ_API_KEY must be set in production when STT_PROVIDER=groq")
+        if self.tts_provider.lower() == "groq" and not self.groq_api_key:
+            problems.append("GROQ_API_KEY must be set in production when TTS_PROVIDER=groq")
         if self.stt_provider.lower() == "local":
             problems.append("STT_PROVIDER=local is a free local-demo provider and must not be used in production")
         if self.tts_provider.lower() == "local":

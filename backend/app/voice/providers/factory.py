@@ -87,6 +87,16 @@ def get_tts_provider() -> TTSProvider:
             piper_provider=piper, hindi_model_id=settings.mms_hindi_model_id,
             kannada_model_id=settings.mms_kannada_model_id,
         )
+    if name == "groq":
+        if not settings.groq_api_key:
+            raise ResourceUnavailableError("TTS provider 'groq' is selected but no GROQ_API_KEY is configured.")
+        from app.voice.providers.groq import GroqTTSProvider
+
+        return GroqTTSProvider(
+            api_key=settings.groq_api_key, model=settings.groq_tts_model,
+            base_url=settings.groq_api_base_url, timeout_seconds=settings.groq_voice_timeout_seconds,
+            voice_name=settings.groq_tts_voice,
+        )
     if not settings.tts_api_key:
         raise ResourceUnavailableError(f"TTS provider '{name}' is selected but no TTS_API_KEY is configured.")
     raise ResourceUnavailableError(f"TTS provider '{name}' has no adapter implemented yet.")
