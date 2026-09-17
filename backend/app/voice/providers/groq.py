@@ -71,6 +71,13 @@ logger = logging.getLogger("app.voice.groq")
 # misdiagnosed as "Groq is slow" again.
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
 
+# See GroqSTTProvider.recognize's no-speech filtering comment. 0.6 rather
+# than something closer to 1.0 - real hallucinated turns observed in
+# testing scored consistently high (near-silence/noise), and erring
+# toward discarding a genuinely-marginal turn (which just reprompts the
+# student) is a better failure mode than acting on hallucinated text.
+_NO_SPEECH_PROB_THRESHOLD = 0.6
+
 
 def _to_groq_language(language: str | None) -> str | None:
     """Maps this platform's language codes (en/hi/hinglish/kn) to the
@@ -187,7 +194,10 @@ class GroqSTTProvider(STTProvider):
             "voice.stt_groq_payload container=%s bytes=%s", content_type, len(payload_bytes),
         )
 
-        fields = {"model": self._model, "response_format": "json"}
+        # "verbose_json" (rather than "json") additionally returns
+        # per-segment `no_speech_prob` - see the no-speech filtering below
+        # for why that is needed.
+        fields = {"model": self._model, "response_format": "verbose_json"}
         groq_language = _to_groq_language(language)
         if groq_language:
             fields["language"] = groq_language
@@ -199,6 +209,29 @@ class GroqSTTProvider(STTProvider):
         except AttributeError as exc:
             logger.warning("voice.stt_groq_malformed_response")
             raise ResourceUnavailableError("Groq STT API returned a malformed response.") from exc
+
+        # Whisper (the model family behind this endpoint) is known to
+        # "hallucinate" plausible-sounding but unrelated text from
+        # background noise or near-silent clips rather than reporting
+        # emptiness - observed in this project's own live voice-console
+        # testing (confidently wrong transcripts like an unrelated
+        # sentence about an unrelated topic, from a clip the VAD armed on
+        # ambient room noise). `no_speech_prob` on each segment is
+        # Whisper's own signal for "there was probably no real speech
+        # here" - a high average across the response's segments means the
+        # returned `text` should be treated the same as genuine silence
+        # (empty result), which `_handle_final_transcript`
+        # (app/services/voice.py) already turns into a clean "Sorry, I
+        # didn't catch that" reprompt rather than acting on nonsense.
+        segments = body.get("segments") if isinstance(body, dict) else None
+        if isinstance(segments, list) and segments:
+            no_speech_probs = [
+                segment.get("no_speech_prob") for segment in segments
+                if isinstance(segment, dict) and isinstance(segment.get("no_speech_prob"), (int, float))
+            ]
+            if no_speech_probs and (sum(no_speech_probs) / len(no_speech_probs)) >= _NO_SPEECH_PROB_THRESHOLD:
+                logger.info("voice.stt_groq_no_speech_detected avg_no_speech_prob=%.2f", sum(no_speech_probs) / len(no_speech_probs))
+                return STTResult(text="", is_final=True, confidence=None, language=language)
 
         # Diagnostic only - length, never the transcript content itself
         # (docs/voice.md section 59: avoid logging personal information).

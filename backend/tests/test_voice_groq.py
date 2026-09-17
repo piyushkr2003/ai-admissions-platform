@@ -162,6 +162,70 @@ def test_stt_recognize_sends_expected_multipart_request_and_parses_response(monk
     assert 'name="file"; filename="audio.wav"' in body_text
     assert "Content-Type: audio/wav" in body_text
     assert FAKE_KEY not in body_text  # the key must only ever be in the header, never the body
+    # verbose_json (not plain json) is required to get segments[].no_speech_prob
+    # back - see the no-speech filtering section below.
+    assert 'name="response_format"' in body_text
+    assert "verbose_json" in body_text
+
+
+# ---------------------------------------------------------------------------
+# No-speech filtering - real bug observed in this project's own live voice
+# console testing: Groq's whisper-large-v3-turbo "hallucinates" plausible
+# but unrelated text from background noise/near-silent clips rather than
+# reporting emptiness. verbose_json's per-segment no_speech_prob is
+# Whisper's own "there was probably no real speech here" signal - a high
+# average across segments is treated the same as genuine silence (empty
+# STTResult.text), which the caller (app/services/voice.py's
+# _handle_final_transcript) already turns into a clean reprompt instead
+# of acting on nonsense.
+# ---------------------------------------------------------------------------
+
+def test_stt_recognize_discards_transcript_when_no_speech_probability_is_high(monkeypatch):
+    def fake_urlopen(request, timeout=None, context=None):
+        return _FakeHTTPResponse({
+            "text": "Thanks for watching, don't forget to like and subscribe!",
+            "segments": [{"no_speech_prob": 0.91}, {"no_speech_prob": 0.87}],
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqSTTProvider(api_key=FAKE_KEY, model="m", base_url="https://api.groq.com", timeout_seconds=5, sample_rate=16000, num_channels=1)
+    result = provider.recognize(_sample_pcm16(), language="en")
+    assert result.text == ""
+
+
+def test_stt_recognize_keeps_transcript_when_no_speech_probability_is_low(monkeypatch):
+    def fake_urlopen(request, timeout=None, context=None):
+        return _FakeHTTPResponse({
+            "text": "What is the fee for B.Tech CSE?",
+            "segments": [{"no_speech_prob": 0.02}, {"no_speech_prob": 0.05}],
+        })
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqSTTProvider(api_key=FAKE_KEY, model="m", base_url="https://api.groq.com", timeout_seconds=5, sample_rate=16000, num_channels=1)
+    result = provider.recognize(_sample_pcm16(), language="en")
+    assert result.text == "What is the fee for B.Tech CSE?"
+
+
+def test_stt_recognize_keeps_transcript_when_segments_are_absent(monkeypatch):
+    """A response with no `segments` field at all (or an older/mocked
+    "json" shape) must not be treated as no-speech by default - only an
+    explicit high no_speech_prob discards a transcript."""
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None, context=None: _stt_response("hello"))
+    provider = GroqSTTProvider(api_key=FAKE_KEY, model="m", base_url="https://api.groq.com", timeout_seconds=5, sample_rate=16000, num_channels=1)
+    result = provider.recognize(_sample_pcm16(), language="en")
+    assert result.text == "hello"
+
+
+def test_stt_recognize_keeps_transcript_when_no_speech_probability_is_right_at_the_threshold_boundary(monkeypatch):
+    """0.6 itself counts as high (>=), matching _NO_SPEECH_PROB_THRESHOLD's
+    definition - only strictly-below values keep the transcript."""
+    def fake_urlopen(request, timeout=None, context=None):
+        return _FakeHTTPResponse({"text": "hello", "segments": [{"no_speech_prob": 0.59}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    provider = GroqSTTProvider(api_key=FAKE_KEY, model="m", base_url="https://api.groq.com", timeout_seconds=5, sample_rate=16000, num_channels=1)
+    result = provider.recognize(_sample_pcm16(), language="en")
+    assert result.text == "hello"
 
 
 # ---------------------------------------------------------------------------
