@@ -553,6 +553,38 @@ def test_tts_synthesize_returns_zero_duration_for_a_non_wav_body_without_raising
     assert result.audio_bytes == b"not a wav file"
 
 
+def test_tts_synthesize_computes_duration_from_actual_bytes_despite_a_bogus_declared_wav_size(monkeypatch):
+    """Regression test for a real bug observed against Groq's live TTS
+    API: it writes a placeholder 0xFFFFFFFF size into the RIFF and `data`
+    subchunk headers (streamed generation, final size unknown up front),
+    which previously made `wave.getnframes()` report a ~25-hour duration
+    for an 8-second reply. The real payload here is 48000 bytes of 16-bit
+    mono PCM at 24000 Hz (48000 / 2 / 24000 * 1000 = 1000ms), with both
+    size fields in the header lying about it."""
+    fmt_chunk = (
+        b"fmt " + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")  # PCM
+        + (1).to_bytes(2, "little")  # mono
+        + (24000).to_bytes(4, "little")  # sample rate
+        + (48000).to_bytes(4, "little")  # byte rate
+        + (2).to_bytes(2, "little")  # block align
+        + (16).to_bytes(2, "little")  # bits per sample
+    )
+    payload = b"\x00\x00" * 24000  # 48000 bytes = 1000ms at 24kHz mono 16-bit
+    wav_bytes = (
+        b"RIFF" + (0xFFFFFFFF).to_bytes(4, "little") + b"WAVE"
+        + fmt_chunk
+        + b"data" + (0xFFFFFFFF).to_bytes(4, "little") + payload
+    )
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=None, context=None: _FakeBinaryResponse(wav_bytes))
+    provider = GroqTTSProvider(api_key=FAKE_KEY, model="canopylabs/orpheus-v1-english", base_url="https://api.groq.com", timeout_seconds=5, voice_name="troy")
+    result = provider.synthesize("hello")
+
+    assert result.duration_ms == 1000
+    assert result.audio_bytes == wav_bytes
+
+
 def test_tts_synthesize_never_logs_the_api_key(monkeypatch, caplog):
     def fake_urlopen(request, timeout=None, context=None):
         raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", hdrs=None, fp=None)

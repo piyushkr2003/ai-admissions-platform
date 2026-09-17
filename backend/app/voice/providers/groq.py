@@ -273,22 +273,44 @@ def _read_error_detail(exc: urllib.error.HTTPError) -> str | None:
 
 
 def _wav_duration_ms(wav_bytes: bytes) -> int:
-    """Reads the duration back out of a WAV file's own header - Groq's TTS
-    endpoint already returns `response_format=wav` audio (unlike Gemini's
-    raw PCM-in-base64, which this project itself has to wrap via
-    `pcm16_to_wav_bytes`), so the frame count/rate are simply read rather
-    than computed. Returns 0 (rather than raising) for a response that,
-    despite a 200 status, isn't a well-formed WAV - synthesis should not
-    fail a turn over a duration estimate that is only ever used for
-    display/logging, never played-back correctness."""
+    """Computes audio duration from a WAV response's actual payload size,
+    not the frame count `wave.getnframes()` derives from the header's
+    *declared* `data` subchunk size.
+
+    Diagnosed failure: Groq's TTS endpoint (confirmed on a real response)
+    writes a placeholder/streaming size - `0xFFFFFFFF` - into both the
+    RIFF and `data` subchunk size fields, since the audio is generated
+    incrementally and the final size isn't known when the header is
+    written. `wave.getnframes()` trusts that declared value verbatim,
+    turning a real several-second reply into a nonsensical ~25-hour
+    `duration_ms`. Since the full response is already buffered in memory
+    here (never streamed to the caller), the real payload size is
+    measured directly from the last `data` chunk marker instead - this
+    also still gives the exact right answer for a well-formed WAV (e.g.
+    `pcm16_to_wav_bytes`'s output), since a correct declared size and the
+    real byte count agree there anyway.
+
+    Returns 0 (rather than raising) for a response that, despite a 200
+    status, isn't a well-formed WAV at all - synthesis should not fail a
+    turn over a duration estimate that is only ever used for display/
+    logging, never played-back correctness."""
     try:
         with wave.open(BytesIO(wav_bytes), "rb") as wav_file:
             frame_rate = wav_file.getframerate()
-            if not frame_rate:
-                return 0
-            return int(wav_file.getnframes() / frame_rate * 1000)
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
     except (wave.Error, EOFError):
         return 0
+    if not frame_rate or not channels or not sample_width:
+        return 0
+
+    data_index = wav_bytes.rfind(b"data")
+    if data_index == -1:
+        return 0
+    payload_bytes = len(wav_bytes) - (data_index + 8)
+    if payload_bytes <= 0:
+        return 0
+    return int(payload_bytes / (channels * sample_width) / frame_rate * 1000)
 
 
 class GroqTTSProvider(TTSProvider):
